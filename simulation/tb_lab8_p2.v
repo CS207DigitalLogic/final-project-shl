@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 `include "../Design/lab8_p2.v"
 `include "../Design/lab8_p2_3.v"
-// tb_lab8_p2.v
+
 module tb_lab8_p2;
 
 reg [4:0] x_in;
