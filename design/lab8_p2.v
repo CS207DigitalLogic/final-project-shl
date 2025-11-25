@@ -1,5 +1,5 @@
 `timescale 1ns / 1ps
-
+//simple Moore FSM to count number of 1's mod 5
 module lab8_p2(
 input [4:0] x_in,
 input clk,rst_n,
