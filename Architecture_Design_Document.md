@@ -50,8 +50,6 @@
 1. LED1用作显示set_Uart_tx_work
 2. LED0用作显示set_Uart_rx_work
 
-### 2. attach corresponding explanations for the input and output devices in the system
-
 ## Part2. Describe the structure of the project
 
 ### 1. Circuit sturcture diagram, clearly marking the 1)input/output ports, 2)the the relationship between top-level module and each submodule, as well as the relationships between submodules
