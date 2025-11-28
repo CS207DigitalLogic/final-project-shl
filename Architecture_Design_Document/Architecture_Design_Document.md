@@ -1,6 +1,9 @@
 # Architecture Design Document
 
-[TOC]
+>小组成员：
+刘以煦 12410148
+邵浩林 12413323
+何成卓 12411443
 
 ## Part1. The Input/Output device used in the project
 
@@ -360,4 +363,3 @@ stateDiagram-v2
     OP_NEXT_STEP --> OP_CHOOSE_TYPE : continue same mode
     OP_NEXT_STEP --> S_MENU : return main menu
 ```
-
