@@ -18,6 +18,7 @@ module top (
 
     // Switches
     input wire [7:0] sw,     // sw[7:5] menu select, sw[4:3] settings, sw[2:0] op mode
+    input wire [2:0] sw_scalar, 
 
     // Buttons
     input wire S3_confirm,   // confirm button (active high)
@@ -79,29 +80,37 @@ debounce u_db_send(
 //======================================================================
 // 1. FSM state encoding
 //======================================================================
-localparam S_IDLE      = 4'd0;
-localparam S_MENU      = 4'd1;
-localparam S_INPUTER   = 4'd2;
-localparam S_GENERATOR = 4'd3;
-localparam S_DISPLAYER = 4'd4;
-localparam S_OPERATOR  = 4'd5;
-localparam S_SETTINGS  = 4'd6;
+localparam S_MENU      = 4'd0;  // SW[7:5] = 000
+localparam S_INPUTER   = 4'd1;  // 001
+localparam S_GENERATOR = 4'd2;  // 010
+localparam S_DISPLAYER = 4'd3;  // 011
+localparam S_OPERATOR  = 4'd4;  // 100
+localparam S_SETTINGS  = 4'd5;  // 101
 
 // operator sub-FSM
-localparam S_OP_T      = 4'd7;
-localparam S_OP_A      = 4'd8;
-localparam S_OP_B      = 4'd9;
-localparam S_OP_C      = 4'd10;
-localparam S_OP_J      = 4'd11;
+localparam S_OP_T      = 4'd6;
+localparam S_OP_A      = 4'd7;
+localparam S_OP_B      = 4'd8;
+localparam S_OP_C      = 4'd9;
+localparam S_OP_J      = 4'd10;
 
 reg [3:0] state, state_next;
 
 //======================================================================
-// 2. Sequential logic (reset �� S_IDLE)
+// 2. input decode
 //======================================================================
-always @(posedge clk or negedge rst_n) begin
+wire [2:0] menu_sel = sw[7:5];  // main menu selection
+wire [2:0] op_sel   = sw[2:0];  // operator sub-function selection
+wire [1:0] setting_sel = sw[4:3]; // setting selection (not used in this top module)
+
+
+
+//======================================================================
+// 3. Sequential logic (reset -> S_MENU)
+//======================================================================
+always @(posedge clk, negedge rst_n) begin
     if (!rst_n)
-        state <= S_IDLE;
+        state <= S_MENU;
     else
         state <= state_next;
 end
@@ -109,53 +118,105 @@ end
 //======================================================================
 // 3. FSM combinational logic: main menu control
 //======================================================================
-wire [2:0] menu_sel   = sw[7:5];
-wire [1:0] setting_sel = sw[4:3];
-wire [2:0] op_sel     = sw[2:0];
-wire [3:0] scalar_val = sw[7:4];
-
 always @(*) begin
     state_next = state;
 
     case (state)
-        S_IDLE: state_next = S_MENU;
-
+        // main menu -> main functions, SW7-SW5 + confirm btn
         S_MENU: begin
             if (confirm_flag) begin
                 case (menu_sel)
-                    3'b000: state_next = S_INPUTER;
-                    3'b001: state_next = S_GENERATOR;
-                    3'b010: state_next = S_DISPLAYER;
-                    3'b011: state_next = S_OPERATOR;
-                    3'b100: state_next = S_SETTINGS;
+                    3'b000: state_next = S_MENU;
+                    3'b001: state_next = S_INPUTER;
+                    3'b010: state_next = S_GENERATOR;
+                    3'b011: state_next = S_DISPLAYER;
+                    3'b100: state_next = S_OPERATOR;
+                    3'b101: state_next = S_SETTINGS;
                     default: state_next = S_MENU;
                 endcase
             end
         end
 
-        // return to menu
-        S_INPUTER:   if (confirm_flag && menu_sel==3'b000) state_next = S_MENU;
-        S_GENERATOR: if (confirm_flag && menu_sel==3'b001) state_next = S_MENU;
-        S_DISPLAYER: if (confirm_flag && menu_sel==3'b010) state_next = S_MENU;
-        S_SETTINGS:  if (confirm_flag && menu_sel==3'b100) state_next = S_MENU;
+        // main functions -> main functions &
+        // back to menu, SW7-SW5 + confirm btn
+        S_INPUTER, 
+        S_GENERATOR, 
+        S_DISPLAYER, 
+        S_SETTINGS: begin
+            if (confirm_flag) begin
+                case (menu_sel)
+                    3'b000: state_next = S_MENU;
+                    3'b001: state_next = S_INPUTER;
+                    3'b010: state_next = S_GENERATOR;
+                    3'b011: state_next = S_DISPLAYER;
+                    3'b100: state_next = S_OPERATOR;
+                    3'b101: state_next = S_SETTINGS;
+                    default: state_next = S_MENU;
+                endcase
+            end
+        end
 
-        // operator �� operator sub-states
+        // operator -> operator sub-states, SW2-SW0 + confirm btn
         S_OPERATOR: begin
             if (confirm_flag) begin
+                // jump to main functions or menu
+                case (menu_sel)
+                    3'b000: state_next = S_MENU;
+                    3'b001: state_next = S_INPUTER;
+                    3'b010: state_next = S_GENERATOR;
+                    3'b011: state_next = S_DISPLAYER;
+                    3'b100: state_next = S_OPERATOR;
+                    3'b101: state_next = S_SETTINGS;
+                    default: ; // stay in current state
+                endcase
+                
+                // jump to operator sub-states
+                if (menu_sel == 3'b100) begin
                 case (op_sel)
                     3'b000: state_next = S_OP_T;
                     3'b001: state_next = S_OP_A;
                     3'b010: state_next = S_OP_B;
                     3'b011: state_next = S_OP_C;
                     3'b100: state_next = S_OP_J;
-                    default: state_next = S_OPERATOR;
+                    default: ; // stay in current state
                 endcase
+                end
             end
         end
 
-        // operator sub-states �� return to menu
-        S_OP_T, S_OP_A, S_OP_B, S_OP_C, S_OP_J:
-            if (confirm_flag) state_next = S_MENU;
+        // operator sub-states -> operator sub-states
+        //& operator sub-states -> main functions
+        S_OP_T, 
+        S_OP_A, 
+        S_OP_B, 
+        S_OP_C, 
+        S_OP_J: begin
+            if (confirm_flag) begin
+                // jump to main functions or menu
+                case (menu_sel)
+                    3'b000: state_next = S_MENU;
+                    3'b001: state_next = S_INPUTER;
+                    3'b010: state_next = S_GENERATOR;
+                    3'b011: state_next = S_DISPLAYER;
+                    3'b100: state_next = S_OPERATOR;
+                    3'b101: state_next = S_SETTINGS;
+                    default: ; // stay in current state
+                endcase
+
+                // jump to operator sub-states
+                if (menu_sel == 3'b100) begin
+                case (op_sel)
+                    3'b000: state_next = S_OP_T;
+                    3'b001: state_next = S_OP_A;
+                    3'b010: state_next = S_OP_B;
+                    3'b011: state_next = S_OP_C;
+                    3'b100: state_next = S_OP_J;
+                    default: ; // stay in current state
+                endcase
+                end
+            end
+        end
+            
     endcase
 end
 
@@ -177,36 +238,42 @@ always @(*) begin
 end
 
 //======================================================================
-// 5. Seven-segment display encoding
+// 5. Seven-segment display definitions
 //======================================================================
 localparam SEG_I = 8'b0000_0110;
-localparam SEG_G = 8'b0100_1111;
-localparam SEG_D = 8'b0011_1110;
+localparam SEG_G = 8'b0011_1101;
+localparam SEG_D = 8'b0101_1110;
 localparam SEG_O = 8'b0011_1111;
 localparam SEG_S = 8'b0110_1101;
 
-localparam SEG_T = 8'b0000_1111;
+localparam SEG_T = 8'b0111_1000;
 localparam SEG_A = 8'b0111_0111;
 localparam SEG_B = 8'b0111_1100;
-localparam SEG_C = 8'b0101_1000;
-localparam SEG_J = 8'b0000_1110;
+localparam SEG_C = 8'b0011_1001;
+localparam SEG_J = 8'b0000_1101;
 localparam SEG_BLANK = 8'b0000_0000;
 
-reg [7:0] dk1_value;
+//======================================================================
+// 6. Seven-segment value selection (combinational)
+//======================================================================
+reg [7:0] dk1_value, dk4_value;
+//dk1: main function indicator
 always @(*) begin
     case (state)
-        S_INPUTER:   dk1_value = SEG_I;
-        S_GENERATOR: dk1_value = SEG_G;
-        S_DISPLAYER: dk1_value = SEG_D;
+        S_INPUTER:       dk1_value = SEG_I;
+        S_GENERATOR:     dk1_value = SEG_G;
+        S_DISPLAYER:     dk1_value = SEG_D;
         S_OPERATOR,
-        S_OP_T, S_OP_A, S_OP_B, S_OP_C, S_OP_J:
-                      dk1_value = SEG_O;
-        S_SETTINGS:  dk1_value = SEG_S;
-        default:     dk1_value = SEG_BLANK;
+        S_OP_T, 
+        S_OP_A, 
+        S_OP_B, 
+        S_OP_C, 
+        S_OP_J:         dk1_value = SEG_O;
+        S_SETTINGS:     dk1_value = SEG_S;
+        default:        dk1_value = SEG_BLANK;
     endcase
 end
-
-reg [7:0] dk4_value;
+//dk4: operator sub-function indicator
 always @(*) begin
     case (state)
         S_OPERATOR: begin
@@ -219,17 +286,16 @@ always @(*) begin
                 default: dk4_value = SEG_BLANK;
             endcase
         end
-
         S_OP_T: dk4_value = SEG_T;
         S_OP_A: dk4_value = SEG_A;
         S_OP_B: dk4_value = SEG_B;
         S_OP_C: dk4_value = SEG_C;
         S_OP_J: dk4_value = SEG_J;
-
         default: dk4_value = SEG_BLANK;
     endcase
 end
 
+// dk7 & dk8: hasn't been used yet, always blank
 reg [7:0] dk7_value, dk8_value;
 always @(*) begin
     dk7_value = SEG_BLANK;
@@ -237,38 +303,48 @@ always @(*) begin
 end
 
 //======================================================================
-// 7-segment output mux
+// 7. seg_scan instance (handles DK1 & DK4 scanning multiplexing)
+//======================================================================
+wire in_operator_mode =
+       (state == S_OPERATOR) ||
+       (state == S_OP_T) || (state == S_OP_A) ||
+       (state == S_OP_B) || (state == S_OP_C) || (state == S_OP_J);
+wire [7:0] display_dk4_value =
+       in_operator_mode ? dk4_value : SEG_BLANK;
+
+wire [7:0] seg0_scan;
+wire       dk1_en_scan;
+wire       dk4_en_scan;
+
+seg_scan u_seg_scan (
+    .clk    (clk),
+    .rst_n  (rst_n),
+
+    .val_a  (dk1_value),          
+    .val_b  (display_dk4_value),  
+
+    .seg    (seg0_scan),          
+    .en_a   (dk1_en_scan),        
+    .en_b   (dk4_en_scan)         
+);
+
+//======================================================================
+// 8. Final seven-segment output mapping (VERY clean)
 //======================================================================
 always @(*) begin
-    seg0 = SEG_BLANK;
-    seg1 = SEG_BLANK;
+    // ------------- DK1-DK4 (seg0 bus) -----------------
+    seg0   = seg0_scan;
+    dk1_en = dk1_en_scan;
+    dk4_en = dk4_en_scan;
 
-    dk1_en = 0;
-    dk4_en = 0;
+    // ------------- DK5-DK8 (seg1 bus) -----------------
+    seg1   = SEG_BLANK;
     dk7_en = 0;
     dk8_en = 0;
-
-    if (state == S_INPUTER || state == S_GENERATOR ||
-        state == S_DISPLAYER || state == S_SETTINGS)
-    begin
-        dk1_en = 1;
-        seg0   = dk1_value;
-    end
-
-    if (state == S_OPERATOR ||
-        state == S_OP_T || state == S_OP_A ||
-        state == S_OP_B || state == S_OP_C || state == S_OP_J)
-    begin
-        dk4_en = 1;
-        seg0   = dk4_value;
-    end
-
-    dk7_en = 1;
-    dk8_en = 1;
 end
 
 //======================================================================
-// 8. UART module
+// 9. UART module
 //======================================================================
 
 // ---------------- UART RX ----------------
@@ -287,7 +363,6 @@ uart_rx #(
 );
 
 // ---------------- UART TX ----------------
-// FIXED: replaced old edge-detection logic with send_flag
 
 wire tx_busy;
 

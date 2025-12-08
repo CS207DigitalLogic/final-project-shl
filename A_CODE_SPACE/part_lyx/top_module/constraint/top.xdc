@@ -24,6 +24,15 @@ set_property IOSTANDARD LVCMOS33 [get_ports uart_tx_rst_n]
 set_property PACKAGE_PIN T5 [get_ports uart_rx_rst_n]
 set_property IOSTANDARD LVCMOS33 [get_ports uart_rx_rst_n]
 
+set_property PACKAGE_PIN U3 [get_ports {sw_scalar[2]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {sw_scalar[2]}]
+
+set_property PACKAGE_PIN U2 [get_ports {sw_scalar[1]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {sw_scalar[1]}]
+
+set_property PACKAGE_PIN V2 [get_ports {sw_scalar[0]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {sw_scalar[0]}]
+
 set_property PACKAGE_PIN R1 [get_ports {sw[0]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {sw[0]}]
 
@@ -117,12 +126,12 @@ set_property IOSTANDARD LVCMOS33 [get_ports dk8_en]
 # ================= UART ===================
 
 # UART RX 
-# FPGA ½ÓÊÕ PC ·¢ËÍµÄÊý¾Ý£¬uart_rx ½ÓÊÕ¶Ë¿Ú
+# FPGA ï¿½ï¿½ï¿½ï¿½ PC ï¿½ï¿½ï¿½Íµï¿½ï¿½ï¿½ï¿½Ý£ï¿½uart_rx ï¿½ï¿½ï¿½Õ¶Ë¿ï¿½
 set_property PACKAGE_PIN N5 [get_ports uart_rx]
 set_property IOSTANDARD LVCMOS33 [get_ports uart_rx]
 
 # UART TX 
-# FPGA ·¢ËÍÊý¾Ýµ½ PC£¬uart_tx ·¢ËÍ¶Ë¿Ú
+# FPGA ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ýµï¿½ PCï¿½ï¿½uart_tx ï¿½ï¿½ï¿½Í¶Ë¿ï¿½
 set_property PACKAGE_PIN T4 [get_ports uart_tx]
 set_property IOSTANDARD LVCMOS33 [get_ports uart_tx]
 
