@@ -309,67 +309,110 @@ d. Timer Module
 
 #### 主菜单 FSM
 
-![main FSM](main_menu_FSM.jpg)
+##### 图 1：主菜单状态机 (Main Menu FSM)
+
+全局规则：
+在任意状态下修改 sw[7:5], 并按下 S3(Confirm), 即可跳转到对应模式
 
 ```mermaid
 stateDiagram-v2
+    direction TB
+    
     %% 初始化
     [*] --> S_MENU : Reset
 
-    %% ==============================
-    %% 1. 主菜单跳转逻辑 (基于 sw[7:5])
-    %% ==============================
-    S_MENU --> S_INPUTER    : sw=001
-    S_MENU --> S_GENERATOR  : sw=010
-    S_MENU --> S_DISPLAYER  : sw=011
-    S_MENU --> OPERATOR_GRP : sw=100
-    S_MENU --> SETTINGS_GRP : sw=101
+    %% 状态定义
+    state "S_MENU (000)" as MENU
+    state "S_INPUTER (001)" as INP
+    state "S_GENERATOR (010)" as GEN
+    state "S_DISPLAYER (011)" as DISP
+    state "S_OPERATOR (100)" as OP
+    state "S_SETTINGS (101)" as SET
 
-    %% ==============================
-    %% 2. 单层功能状态
-    %% ==============================
-    S_INPUTER --> S_MENU : sw=000
-    S_GENERATOR --> S_MENU : sw=000
-    S_DISPLAYER --> S_MENU : sw=000
+    %% 核心跳转逻辑 (去除方括号)
+    MENU --> INP : sw7-5=001 + Confirm
+    MENU --> GEN : sw7-5=010 + Confirm
+    MENU --> DISP : sw7-5=011 + Confirm
+    MENU --> OP : sw7-5=100 + Confirm
+    MENU --> SET : sw7-5=101 + Confirm
 
-    %% ==============================
-    %% 3. Operator 复合状态组
-    %% ==============================
-    state OPERATOR_GRP {
-        [*] --> S_OPERATOR
-        
-        %% 在 Operator 模式下再次按下 Confirm 进入子功能
-        S_OPERATOR --> S_OP_T : sw_op=000
-        S_OPERATOR --> S_OP_A : sw_op=001
-        S_OPERATOR --> S_OP_B : sw_op=010
-        S_OPERATOR --> S_OP_C : sw_op=011
-        S_OPERATOR --> S_OP_J : sw_op=100
+    %% 任意状态回主菜单
+    INP --> MENU : sw7-5=000 + Confirm
+    GEN --> MENU : sw7-5=000 + Confirm
+    DISP --> MENU : sw7-5=000 + Confirm
+    OP --> MENU : sw7-5=000 + Confirm
+    SET --> MENU : sw7-5=000 + Confirm
 
-        %% 子功能之间也可以互相跳转 (只要 sw_menu 保持 100)
-        S_OP_T --> S_OP_A : sw_op change
-        S_OP_A --> S_OP_B : sw_op change
-        %% ... (简化连线，实际上互通)
-    }
-    %% 从组内任意状态返回菜单
-    OPERATOR_GRP --> S_MENU : sw=000
-
-    %% ==============================
-    %% 4. Settings 复合状态组
-    %% ==============================
-    state SETTINGS_GRP {
-        [*] --> S_SETTINGS
-
-        %% 在 Settings 模式下再次按下 Confirm 进入子设置
-        S_SETTINGS --> S_SE_n : sw_set=00
-        S_SETTINGS --> S_SE_c : sw_set=01
-        S_SETTINGS --> S_SE_r : sw_set=10
-        
-        %% 子设置之间互相跳转
-        S_SE_n --> S_SE_c : sw_set change
-    }
-    %% 从组内任意状态返回菜单
-    SETTINGS_GRP --> S_MENU : sw=000
 ```
+
+##### 图 2：Operator 子状态机 (Operator FSM)
+
+为了图表简洁，省略了所有两两互切的线，逻辑是一样的
+DK1 显示 'O'
+DK4 预览子功能字母
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    
+    %% 进入 Operator 模式 (去除方括号)
+    [*] --> S_OPERATOR : sw7-5=100 + Confirm
+
+    %% 父状态
+    state "S_OPERATOR(等待子功能选择)" as ROOT_OP
+
+    %% 子状态定义
+    state "S_OP_T" as T
+    state "S_OP_A" as A
+    state "S_OP_B" as B
+    state "S_OP_C" as C
+    state "S_OP_J" as J
+
+    %% 跳转逻辑 (去除方括号)
+    ROOT_OP --> T : sw2-0=000 + Confirm
+    ROOT_OP --> A : sw2-0=001 + Confirm
+    ROOT_OP --> B : sw2-0=010 + Confirm
+    ROOT_OP --> C : sw2-0=011 + Confirm
+    ROOT_OP --> J : sw2-0=100 + Confirm
+
+    %% 子状态互切
+    T --> A : sw2-0=001 + Confirm
+    A --> B : sw2-0=010 + Confirm
+
+```
+
+##### 图 3：Settings 子状态机 (Settings FSM)
+
+DK1 显示 'S'
+DK4 预览子功能字母
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    %% 进入 Settings 模式 (去除方括号)
+    [*] --> S_SETTINGS : sw7-5=101 + Confirm
+
+    %% 父状态
+    state "S_SETTINGS(等待子功能选择)" as ROOT_SET
+
+    %% 子状态定义
+    state "S_SE_n (00)" as SE_N
+    state "S_SE_c (01)" as SE_C
+    state "S_SE_r (10)" as SE_R
+
+    %% 跳转逻辑 (去除方括号)
+    ROOT_SET --> SE_N : sw4-3=00 + Confirm
+    ROOT_SET --> SE_C : sw4-3=01 + Confirm
+    ROOT_SET --> SE_R : sw4-3=10 + Confirm
+
+    %% 子状态互切
+    SE_N --> SE_C : sw4-3=01 + Confirm
+    SE_C --> SE_R : sw4-3=10 + Confirm
+    SE_R --> SE_N : sw4-3=00 + Confirm
+
+```
+
 ---
 
 #### 矩阵运算 FSM
