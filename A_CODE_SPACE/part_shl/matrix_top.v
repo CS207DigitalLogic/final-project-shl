@@ -1,8 +1,8 @@
 `timescale 1ns / 1ps
 
 module Matrix_System_Top(
-    input wire clk,             // 系统时钟 (推荐 50MHz 或 100MHz)
-    input wire rst_n,           // 系统复位
+    input wire clk,             
+    input wire rst_n,           
     
     // ============================================================
     // 1. 硬件交互接口 (板载开关 & 按键)
@@ -19,6 +19,9 @@ module Matrix_System_Top(
     input wire [1:0] sw_id_B,   // 选择运算数 B 的 ID (0~3)
     input wire [3:0] sw_scalar, // 标量输入 (用于标量乘法)
     input wire btn_start,       // 启动计算按钮
+    input wire btn_confirm,     // 确认按钮
+    input wire [3:0] sw_countdown, // 倒计时设置 (5-15秒)
+    input wire sw_manual_mode,  // 手动/随机模式选择
     
     // ============================================================
     // 2. UART 串口接口
@@ -36,7 +39,13 @@ module Matrix_System_Top(
     output reg led_error,       // 维度不合法报错
     output reg led_idle,        // 空闲状态
     output reg led_busy,        // 正在计算/传输
-    output reg led_done         // 完成一次计算
+    output reg led_done,        // 完成一次计算
+    
+    // ============================================================
+    // 4. 七段数码管接口
+    // ============================================================
+    output wire [6:0] seg_display,   // 七段显示 (a~g)
+    output wire [3:0] seg_select     // 位选择 (4位数码管)
 );
 
     // ============================================================
@@ -46,6 +55,7 @@ module Matrix_System_Top(
     localparam MAX_COLS = 5;
     localparam STORAGE_DEPTH = 4; // 存储 4 个矩阵
     localparam FLATTENED_SIZE = 25;
+    localparam CLK_FREQ = 100_000_000; // 100MHz 时钟频率
 
     // ============================================================
     // 内部存储堆 (Matrix Storage Heap)
@@ -55,7 +65,16 @@ module Matrix_System_Top(
     // 维度存储：4组
     reg [2:0] mem_rows [0:STORAGE_DEPTH-1];
     reg [2:0] mem_cols [0:STORAGE_DEPTH-1];
-
+    // 矩阵计数
+    reg [2:0] mat_count;
+    
+    // ============================================================
+    // 七段数码管显示信号
+    // ============================================================
+    reg [3:0] seg_digit0, seg_digit1, seg_digit2, seg_digit3; // 4位显示数值
+    wire [3:0] countdown_display;     // 倒计时显示值
+    wire [3:0] op_type_display;       // 运算类型显示值
+    wire       timer_timeout;         // 倒计时超时信号
     // ============================================================
     // 模块 1: UART 接收解析状态机 (RX Parser)
     // ============================================================
@@ -143,11 +162,27 @@ module Matrix_System_Top(
         end
     endgenerate
 
-    // 提取卷积核 (从矩阵A的前3行前3列提取)
+    // 提取卷积核 (从矩阵A提取，支持1x1到3x3)
     wire [3:0] kernel_flat [0:8];
     assign kernel_flat[0] = mem_data[sw_id_A][0]; assign kernel_flat[1] = mem_data[sw_id_A][1]; assign kernel_flat[2] = mem_data[sw_id_A][2];
     assign kernel_flat[3] = mem_data[sw_id_A][5]; assign kernel_flat[4] = mem_data[sw_id_A][6]; assign kernel_flat[5] = mem_data[sw_id_A][7];
     assign kernel_flat[6] = mem_data[sw_id_A][10];assign kernel_flat[7] = mem_data[sw_id_A][11];assign kernel_flat[8] = mem_data[sw_id_A][12];
+
+    // ============================================================
+    // 卷积合法性验证器实例化
+    // ============================================================
+    wire conv_valid;
+    wire [3:0] conv_out_row, conv_out_col;
+    
+    convoluter_validator u_conv_validator (
+        .kernel_row(dim_ra[2:0]),   // 卷积核用矩阵A的维度
+        .kernel_col(dim_ca[2:0]),
+        .image_row({1'b0, dim_rb}), // 图像用矩阵B的维度
+        .image_col({1'b0, dim_cb}),
+        .valid_conv(conv_valid),
+        .output_row(conv_out_row),
+        .output_col(conv_out_col)
+    );
 
     // 启动脉冲逻辑
     reg mat_start, conv_start;
@@ -160,20 +195,32 @@ module Matrix_System_Top(
             mat_start <= 0; conv_start <= 0;
             if(btn_start) begin
                 if(is_conv_mode) begin
-                    conv_start <= 1; // 卷积无条件启动
-                    led_error <= 0;
+                    // 卷积模式：需要验证卷积核与图像尺寸
+                    if(conv_valid) begin
+                        conv_start <= 1;
+                        led_error <= 0;
+                    end else begin
+                        led_error <= 1; // 卷积尺寸不合法
+                    end
                 end else begin
                     // 矩阵模式维度检查
                     case(sw_op_type)
                         3'b001: begin // 加法 (MxN) == (MxN)
-                            if(dim_ra == dim_rb && dim_ca == dim_cb) mat_start <= 1;
-                            else led_error <= 1;
+                            if(dim_ra == dim_rb && dim_ca == dim_cb) begin
+                                mat_start <= 1;
+                                led_error <= 0;
+                            end else led_error <= 1;
                         end
                         3'b011: begin // 乘法 (MxK) * (KxN) -> ca == rb
-                            if(dim_ca == dim_rb) mat_start <= 1;
-                            else led_error <= 1;
+                            if(dim_ca == dim_rb) begin
+                                mat_start <= 1;
+                                led_error <= 0;
+                            end else led_error <= 1;
                         end
-                        default: mat_start <= 1; // 转置和标量直接启动
+                        default: begin
+                            mat_start <= 1; // 转置和标量直接启动
+                            led_error <= 0;
+                        end
                     endcase
                 end
             end
@@ -202,18 +249,27 @@ module Matrix_System_Top(
         .matrix_C_row(mat_res_r), .matrix_C_col(mat_res_c)
     );
 
-    // Core B: 卷积计算
+    // Core B: 卷积计算 (使用新的 convoluter 模块)
     wire conv_done;
-    wire [15:0] conv_res_pixel;
-    wire conv_res_valid;
+    wire [15:0] conv_res_flat [0:24];
+    wire [2:0] conv_res_r, conv_res_c;
     
-    convolution u_conv_core (
+    convoluter u_conv_core (
         .clk(clk), .rst_n(rst_n),
         .start(conv_start),
+        // 图像输入 (使用矩阵B作为图像)
+        .image_flat(core_in_B),
+        .image_row(dim_rb),
+        .image_col(dim_cb),
+        // 卷积核输入 (使用矩阵A作为卷积核)
         .kernel_flat(kernel_flat),
-        .pixel_out(conv_res_pixel),
-        .pixel_valid(conv_res_valid),
-        .done(conv_done)
+        .kernel_row(dim_ra[1:0]),
+        .kernel_col(dim_ca[1:0]),
+        // 输出
+        .done(conv_done),
+        .result_flat(conv_res_flat),
+        .result_row(conv_res_r),
+        .result_col(conv_res_c)
     );
 
     // ============================================================
@@ -238,9 +294,8 @@ module Matrix_System_Top(
     localparam TX_NEXT      = 4'd8; // 下一个
     localparam TX_CONV_BUF  = 4'd9; // 卷积模式缓冲
 
-    // 卷积数据缓冲 (因为卷积出数快，串口慢，需要 latch)
-    reg [15:0] conv_latch_val;
-    reg conv_data_ready;
+    // 卷积结果维度寄存器 (用于TX状态机)
+    reg [2:0] conv_out_r_reg, conv_out_c_reg;
 
     // 状态指示灯
     always @(posedge clk) begin
@@ -254,7 +309,8 @@ module Matrix_System_Top(
             tx_state <= TX_IDLE;
             uart_tx_start <= 0;
             led_done <= 0;
-            conv_data_ready <= 0;
+            conv_out_r_reg <= 0;
+            conv_out_c_reg <= 0;
         end else begin
             // 默认拉低 TX Start (脉冲信号)
             uart_tx_start <= 0;
@@ -268,27 +324,29 @@ module Matrix_System_Top(
                         out_r <= 0; out_c <= 0;
                         tx_state <= TX_FETCH;
                     end
-                    else if(conv_res_valid && is_conv_mode) begin
-                        // 卷积模式：捕获到一个新数据
-                        conv_latch_val <= conv_res_pixel;
-                        tx_state <= TX_CALC_BCD; // 直接去发送
-                    end
                     else if(conv_done && is_conv_mode) begin
-                        led_done <= 1; // 卷积全部结束
+                        // 卷积模式完成：开始输出结果矩阵
+                        led_done <= 1;
+                        out_r <= 0; out_c <= 0;
+                        conv_out_r_reg <= conv_res_r;
+                        conv_out_c_reg <= conv_res_c;
+                        tx_state <= TX_FETCH;
                     end
                 end
 
-                // --- 矩阵模式：取数 ---
+                // --- 取数 (矩阵模式和卷积模式统一处理) ---
                 TX_FETCH: begin
-                    current_val <= mat_res_flat[out_r * 5 + out_c];
+                    if(is_conv_mode) begin
+                        current_val <= conv_res_flat[out_r * 5 + out_c];
+                    end else begin
+                        current_val <= mat_res_flat[out_r * 5 + out_c];
+                    end
                     tx_state <= TX_CALC_BCD;
                 end
 
                 // --- 通用：二进制转 BCD (Binary to BCD) ---
                 // 简单起见，这里支持到 9999
                 TX_CALC_BCD: begin
-                    if (is_conv_mode) current_val <= conv_latch_val;
-                    
                     bcd_thousands <= (current_val / 1000) % 10;
                     bcd_hundreds  <= (current_val / 100) % 10;
                     bcd_tens      <= (current_val / 10) % 10;
@@ -351,31 +409,48 @@ module Matrix_System_Top(
                     if(!uart_tx_busy) begin
                         uart_tx_start <= 1;
                         
+                        // 获取当前结果矩阵的列数
                         if(is_conv_mode) begin
-                            uart_tx_data <= 8'h20; // 卷积模式全是空格
-                            tx_state <= TX_IDLE;   // 发完一个数，回IDLE等下一个
+                            // 卷积模式：按矩阵格式输出
+                            if(out_c == conv_out_c_reg - 1) uart_tx_data <= 8'h0A; // \n
+                            else uart_tx_data <= 8'h20; // Space
                         end else begin
                             // 矩阵模式：一行结束发换行，否则发空格
-                            if(out_c == mat_res_col - 1) uart_tx_data <= 8'h0A; // \n
+                            if(out_c == mat_res_c - 1) uart_tx_data <= 8'h0A; // \n
                             else uart_tx_data <= 8'h20; // Space
-                            tx_state <= TX_NEXT;
                         end
+                        tx_state <= TX_NEXT;
                     end
                 end
 
-                // --- 矩阵模式：游标更新 ---
+                // --- 游标更新 (矩阵模式和卷积模式统一处理) ---
                 TX_NEXT: begin
                     if(!uart_tx_busy) begin // 确保分隔符发完了
-                        if(out_c == mat_res_col - 1) begin
-                            out_c <= 0;
-                            if(out_r == mat_res_row - 1) tx_state <= TX_IDLE; // 全部发完
-                            else begin
-                                out_r <= out_r + 1;
-                                tx_state <= TX_FETCH; // 继续下一行
+                        // 获取当前结果矩阵的行列数
+                        if(is_conv_mode) begin
+                            if(out_c == conv_out_c_reg - 1) begin
+                                out_c <= 0;
+                                if(out_r == conv_out_r_reg - 1) tx_state <= TX_IDLE; // 全部发完
+                                else begin
+                                    out_r <= out_r + 1;
+                                    tx_state <= TX_FETCH; // 继续下一行
+                                end
+                            end else begin
+                                out_c <= out_c + 1;
+                                tx_state <= TX_FETCH; // 继续下一列
                             end
                         end else begin
-                            out_c <= out_c + 1;
-                            tx_state <= TX_FETCH; // 继续下一列
+                            if(out_c == mat_res_c - 1) begin
+                                out_c <= 0;
+                                if(out_r == mat_res_r - 1) tx_state <= TX_IDLE; // 全部发完
+                                else begin
+                                    out_r <= out_r + 1;
+                                    tx_state <= TX_FETCH; // 继续下一行
+                                end
+                            end else begin
+                                out_c <= out_c + 1;
+                                tx_state <= TX_FETCH; // 继续下一列
+                            end
                         end
                     end
                 end
@@ -384,5 +459,193 @@ module Matrix_System_Top(
             endcase
         end
     end
+
+    // ============================================================
+    // 模块 5: 矩阵计数管理
+    // ============================================================
+    // 当通过UART录入新矩阵时，更新矩阵计数
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            mat_count <= 3'd0;
+        end else begin
+            // 当录入完成时，更新计数
+            if (rx_state == RX_DATA && uart_rx_valid) begin
+                if (rx_c_cnt == curr_rx_c_limit - 1 && rx_r_cnt == curr_rx_r_limit - 1) begin
+                    // 检查是否是新矩阵还是覆盖已有矩阵
+                    if (curr_rx_id >= mat_count) begin
+                        mat_count <= curr_rx_id + 1;
+                    end
+                end
+            end
+        end
+    end
+
+    // ============================================================
+    // 模块 6: 倒计时器实例化
+    // ============================================================
+    reg  timer_start_pulse;
+    reg  timer_reset_pulse;
+    wire [3:0] timer_set_seconds;
+    
+    // 倒计时设置：5-15秒，默认10秒
+    assign timer_set_seconds = (sw_countdown >= 4'd5 && sw_countdown <= 4'd15) ? 
+                                sw_countdown : 4'd10;
+    
+    timer #(
+        .CLK_FREQ(CLK_FREQ)
+    ) u_timer (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(timer_start_pulse),
+        .reset(timer_reset_pulse),
+        .set_seconds(timer_set_seconds),
+        .timeout_flag(timer_timeout),
+        .current_seconds(countdown_display)
+    );
+    
+    // ============================================================
+    // 模块 7: 加法和乘法验证器
+    // ============================================================
+    wire add_valid;
+    wire mul_valid;
+    wire [2:0] mul_result_row, mul_result_col;
+    
+    adder_validator u_add_validator (
+        .a_row(dim_ra),
+        .a_col(dim_ca),
+        .b_row(dim_rb),
+        .b_col(dim_cb),
+        .valid_add(add_valid)
+    );
+    
+    multiplexer_validator u_mul_validator (
+        .a_row(dim_ra),
+        .a_col(dim_ca),
+        .b_row(dim_rb),
+        .b_col(dim_cb),
+        .valid_mul(mul_valid),
+        .result_row(mul_result_row),
+        .result_col(mul_result_col)
+    );
+    
+    // ============================================================
+    // 模块 8: 七段数码管显示控制
+    // ============================================================
+    // 显示内容：
+    // - 位0: 运算类型 (0-4 对应 T/A/B/C/J)
+    // - 位1-2: 保留
+    // - 位3: 倒计时秒数
+    
+    // 运算类型编码到显示
+    assign op_type_display = {1'b0, sw_op_type};
+    
+    // 显示数据选择
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            seg_digit0 <= 4'd0;
+            seg_digit1 <= 4'd0;
+            seg_digit2 <= 4'd0;
+            seg_digit3 <= 4'd0;
+            timer_start_pulse <= 1'b0;
+            timer_reset_pulse <= 1'b1;
+        end else begin
+            timer_start_pulse <= 1'b0;
+            timer_reset_pulse <= 1'b0;
+            
+            // 根据当前状态选择显示内容
+            if (led_error && !conv_valid && is_conv_mode) begin
+                // 卷积不合法：显示倒计时
+                seg_digit3 <= countdown_display;
+                seg_digit2 <= 4'hE; // 'E' 表示 Error
+                seg_digit1 <= 4'hE;
+                seg_digit0 <= op_type_display;
+                
+                // 启动倒计时
+                if (!timer_timeout) begin
+                    timer_start_pulse <= 1'b1;
+                end
+            end else if (led_error) begin
+                // 其他运算不合法
+                seg_digit3 <= countdown_display;
+                seg_digit2 <= 4'hE;
+                seg_digit1 <= 4'hE;
+                seg_digit0 <= op_type_display;
+                
+                if (!timer_timeout) begin
+                    timer_start_pulse <= 1'b1;
+                end
+            end else begin
+                // 正常显示
+                timer_reset_pulse <= 1'b1;
+                seg_digit3 <= mat_count[2:0];           // 矩阵总数
+                seg_digit2 <= {2'b00, sw_id_A};         // 操作数A的ID
+                seg_digit1 <= {2'b00, sw_id_B};         // 操作数B的ID
+                seg_digit0 <= op_type_display;          // 运算类型
+            end
+        end
+    end
+    
+    // ============================================================
+    // 模块 9: 七段数码管扫描驱动
+    // ============================================================
+    // 扫描频率：约1kHz (100MHz / 100000)
+    reg [16:0] scan_cnt;
+    reg [1:0]  scan_sel;
+    reg [3:0]  scan_digit;
+    reg [6:0]  seg_pattern;
+    
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            scan_cnt <= 17'd0;
+            scan_sel <= 2'd0;
+        end else begin
+            if (scan_cnt == 17'd99999) begin
+                scan_cnt <= 17'd0;
+                scan_sel <= scan_sel + 1;
+            end else begin
+                scan_cnt <= scan_cnt + 1;
+            end
+        end
+    end
+    
+    // 位选择逻辑
+    assign seg_select = ~(4'b0001 << scan_sel); // 低电平有效
+    
+    // 当前显示位的数值
+    always @(*) begin
+        case (scan_sel)
+            2'd0: scan_digit = seg_digit0;
+            2'd1: scan_digit = seg_digit1;
+            2'd2: scan_digit = seg_digit2;
+            2'd3: scan_digit = seg_digit3;
+            default: scan_digit = 4'd0;
+        endcase
+    end
+    
+    // 七段译码 (共阴极，高电平点亮)
+    // 段排列: seg_display[6:0] = {g, f, e, d, c, b, a}
+    always @(*) begin
+        case (scan_digit)
+            4'h0: seg_pattern = 7'b0111111; // 0
+            4'h1: seg_pattern = 7'b0000110; // 1
+            4'h2: seg_pattern = 7'b1011011; // 2
+            4'h3: seg_pattern = 7'b1001111; // 3
+            4'h4: seg_pattern = 7'b1100110; // 4
+            4'h5: seg_pattern = 7'b1101101; // 5
+            4'h6: seg_pattern = 7'b1111101; // 6
+            4'h7: seg_pattern = 7'b0000111; // 7
+            4'h8: seg_pattern = 7'b1111111; // 8
+            4'h9: seg_pattern = 7'b1101111; // 9
+            4'hA: seg_pattern = 7'b1110111; // A
+            4'hB: seg_pattern = 7'b1111100; // b
+            4'hC: seg_pattern = 7'b0111001; // C
+            4'hD: seg_pattern = 7'b1011110; // d
+            4'hE: seg_pattern = 7'b1111001; // E
+            4'hF: seg_pattern = 7'b1110001; // F
+            default: seg_pattern = 7'b0000000;
+        endcase
+    end
+    
+    assign seg_display = seg_pattern;
 
 endmodule
