@@ -94,6 +94,11 @@ localparam S_OP_B      = 4'd8;
 localparam S_OP_C      = 4'd9;
 localparam S_OP_J      = 4'd10;
 
+// settings sub-FSM
+localparam S_SE_n      = 4'd11;
+localparam S_SE_c      = 4'd12;
+localparam S_SE_r      = 4'd13;
+
 reg [3:0] state, state_next;
 
 //======================================================================
@@ -102,7 +107,6 @@ reg [3:0] state, state_next;
 wire [2:0] menu_sel = sw[7:5];  // main menu selection
 wire [2:0] op_sel   = sw[2:0];  // operator sub-function selection
 wire [1:0] setting_sel = sw[4:3]; // setting selection (not used in this top module)
-
 
 
 //======================================================================
@@ -140,9 +144,8 @@ always @(*) begin
         // main functions -> main functions &
         // back to menu, SW7-SW5 + confirm btn
         S_INPUTER, 
-        S_GENERATOR, 
-        S_DISPLAYER, 
-        S_SETTINGS: begin
+        S_GENERATOR,  
+        S_DISPLAYER: begin
             if (confirm_flag) begin
                 case (menu_sel)
                     3'b000: state_next = S_MENU;
@@ -172,14 +175,14 @@ always @(*) begin
                 
                 // jump to operator sub-states
                 if (menu_sel == 3'b100) begin
-                case (op_sel)
-                    3'b000: state_next = S_OP_T;
-                    3'b001: state_next = S_OP_A;
-                    3'b010: state_next = S_OP_B;
-                    3'b011: state_next = S_OP_C;
-                    3'b100: state_next = S_OP_J;
-                    default: ; // stay in current state
-                endcase
+                    case (op_sel)
+                        3'b000: state_next = S_OP_T;
+                        3'b001: state_next = S_OP_A;
+                        3'b010: state_next = S_OP_B;
+                        3'b011: state_next = S_OP_C;
+                        3'b100: state_next = S_OP_J;
+                        default: ; // stay in current state
+                    endcase
                 end
             end
         end
@@ -216,6 +219,61 @@ always @(*) begin
                 end
             end
         end
+
+        // settings -> settings sub-states, SW4-SW3 + confirm btn
+        S_SETTINGS: begin
+            if (confirm_flag) begin
+                // jump to main functions or menu
+                case (menu_sel)
+                    3'b000: state_next = S_MENU;
+                    3'b001: state_next = S_INPUTER;
+                    3'b010: state_next = S_GENERATOR;
+                    3'b011: state_next = S_DISPLAYER;
+                    3'b100: state_next = S_OPERATOR;
+                    3'b101: state_next = S_SETTINGS;
+                    default: ; // stay in current state
+                endcase
+
+                // jump to settings sub-states
+                if (menu_sel == 3'b101) begin
+                    case (setting_sel)
+                        2'b00: state_next = S_SE_n;
+                        2'b01: state_next = S_SE_c;
+                        2'b10: state_next = S_SE_r;
+                        default: ; // stay in current state
+                    endcase
+                end
+            end
+        end
+
+        // settings sub-states -> settings sub-states
+        // & settings sub-states -> main functions
+        S_SE_n,
+        S_SE_c,
+        S_SE_r: begin
+            if (confirm_flag) begin
+                // jump to main functions or menu
+                case (menu_sel)
+                    3'b000: state_next = S_MENU;
+                    3'b001: state_next = S_INPUTER;
+                    3'b010: state_next = S_GENERATOR;
+                    3'b011: state_next = S_DISPLAYER;
+                    3'b100: state_next = S_OPERATOR;
+                    3'b101: state_next = S_SETTINGS;
+                    default: ; // stay in current state
+                endcase
+
+                // jump to settings sub-states
+                if (menu_sel == 3'b101) begin
+                    case (setting_sel)
+                        2'b00: state_next = S_SE_n;
+                        2'b01: state_next = S_SE_c;
+                        2'b10: state_next = S_SE_r;
+                        default: ; // stay in current state
+                    endcase
+                end
+            end
+        end
             
     endcase
 end
@@ -240,6 +298,7 @@ end
 //======================================================================
 // 5. Seven-segment display definitions
 //======================================================================
+localparam SEG_M = 8'b1000_0000; //use a dot to represent 'M' for Menu
 localparam SEG_I = 8'b0000_0110;
 localparam SEG_G = 8'b0011_1101;
 localparam SEG_D = 8'b0101_1110;
@@ -251,6 +310,11 @@ localparam SEG_A = 8'b0111_0111;
 localparam SEG_B = 8'b0111_1100;
 localparam SEG_C = 8'b0011_1001;
 localparam SEG_J = 8'b0000_1101;
+
+localparam SEG_n = 8'b0101_0100;
+localparam SEG_c = 8'b0101_1000;
+localparam SEG_r = 8'b0101_0000;
+
 localparam SEG_BLANK = 8'b0000_0000;
 
 //======================================================================
@@ -260,6 +324,7 @@ reg [7:0] dk1_value, dk4_value;
 //dk1: main function indicator
 always @(*) begin
     case (state)
+        S_MENU:          dk1_value = SEG_M;
         S_INPUTER:       dk1_value = SEG_I;
         S_GENERATOR:     dk1_value = SEG_G;
         S_DISPLAYER:     dk1_value = SEG_D;
@@ -268,29 +333,48 @@ always @(*) begin
         S_OP_A, 
         S_OP_B, 
         S_OP_C, 
-        S_OP_J:         dk1_value = SEG_O;
-        S_SETTINGS:     dk1_value = SEG_S;
-        default:        dk1_value = SEG_BLANK;
+        S_OP_J:          dk1_value = SEG_O;
+        S_SETTINGS,
+        S_SE_n,
+        S_SE_c,
+        S_SE_r:          dk1_value = SEG_S;
+        default:         dk1_value = SEG_BLANK;
     endcase
 end
-//dk4: operator sub-function indicator
+//dk4: operator & settings sub-function indicator
 always @(*) begin
+    dk4_value = SEG_BLANK;
+
     case (state)
         S_OPERATOR: begin
             case(op_sel)
-                3'b000: dk4_value = SEG_T;
-                3'b001: dk4_value = SEG_A;
-                3'b010: dk4_value = SEG_B;
-                3'b011: dk4_value = SEG_C;
-                3'b100: dk4_value = SEG_J;
+                3'b000:  dk4_value = SEG_T;
+                3'b001:  dk4_value = SEG_A;
+                3'b010:  dk4_value = SEG_B;
+                3'b011:  dk4_value = SEG_C;
+                3'b100:  dk4_value = SEG_J;
                 default: dk4_value = SEG_BLANK;
             endcase
         end
-        S_OP_T: dk4_value = SEG_T;
-        S_OP_A: dk4_value = SEG_A;
-        S_OP_B: dk4_value = SEG_B;
-        S_OP_C: dk4_value = SEG_C;
-        S_OP_J: dk4_value = SEG_J;
+        S_OP_T:  dk4_value = SEG_T;
+        S_OP_A:  dk4_value = SEG_A;
+        S_OP_B:  dk4_value = SEG_B;
+        S_OP_C:  dk4_value = SEG_C;
+        S_OP_J:  dk4_value = SEG_J;
+
+        // ---------------------------------------------
+        S_SETTINGS: begin
+            case(setting_sel)
+                2'b00:   dk4_value = SEG_n;
+                2'b01:   dk4_value = SEG_c;
+                2'b10:   dk4_value = SEG_r;
+                default: dk4_value = SEG_BLANK;
+            endcase
+        end
+        S_SE_n:  dk4_value = SEG_n;
+        S_SE_c:  dk4_value = SEG_c;
+        S_SE_r:  dk4_value = SEG_r;
+
         default: dk4_value = SEG_BLANK;
     endcase
 end
@@ -305,12 +389,11 @@ end
 //======================================================================
 // 7. seg_scan instance (handles DK1 & DK4 scanning multiplexing)
 //======================================================================
-wire in_operator_mode =
-       (state == S_OPERATOR) ||
-       (state == S_OP_T) || (state == S_OP_A) ||
-       (state == S_OP_B) || (state == S_OP_C) || (state == S_OP_J);
+wire in_operator_or_settings_mode =
+       (state == S_OPERATOR) || (state == S_OP_T) || (state == S_OP_A) || (state == S_OP_B) || (state == S_OP_C) || (state == S_OP_J) ||
+       (state == S_SETTINGS) || (state == S_SE_n) || (state == S_SE_c) || (state == S_SE_r);
 wire [7:0] display_dk4_value =
-       in_operator_mode ? dk4_value : SEG_BLANK;
+       in_operator_or_settings_mode ? dk4_value : SEG_BLANK;
 
 wire [7:0] seg0_scan;
 wire       dk1_en_scan;

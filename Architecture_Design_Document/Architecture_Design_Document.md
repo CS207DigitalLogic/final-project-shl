@@ -33,14 +33,19 @@
    - 矩阵运算(O)
    - 设置(S)
 
-2. DK4用作目前在哪一种运算方式
+2. 若在operator，DK4用作目前在哪一种运算方式
    - 矩阵转置(T)
    - 矩阵加法(A)
    - 矩阵标量乘法(B)
    - 矩阵乘法(C)
    - 卷积(J)
 
-3. DK7,DK8用作倒计时。DK7为MSB，DK8为LSB
+3. 若在settings，DK4用作目前在哪一种具体设置
+   - 每规格矩阵数量上限（n）
+   - 倒计时秒数（c）
+   - 元素范围（r）
+
+4. DK7,DK8用作倒计时。DK7为MSB，DK8为LSB
 
 ##### **LD2**
 
@@ -79,7 +84,7 @@ matrix_calculator/                    # 顶层模块 (包含主 FSM)
 │
 ├── settings_sys/                     # 动态配置模块（Bonus）
 │   ├── settings                      # 总控 FSM
-│   ├── x_settings                    # 每规格矩阵数量上限
+│   ├── n_settings                    # 每规格矩阵数量上限
 │   ├── timer_settings                # 倒计时秒数（5~15）
 │   └── validate_num_range_settings   # 元素范围（默认 0–9）
 │
@@ -308,21 +313,62 @@ d. Timer Module
 
 ```mermaid
 stateDiagram-v2
-    [*] --> S_IDLE
-    S_IDLE --> S_MENU : rst done
+    %% 初始化
+    [*] --> S_MENU : Reset
 
-    S_MENU --> S_INPUTER 
-    S_MENU --> S_GENERATOR
-    S_MENU --> S_DISPLAYER 
-    S_MENU --> S_OPERATOR 
-    S_MENU --> S_SETTINGS 
+    %% ==============================
+    %% 1. 主菜单跳转逻辑 (基于 sw[7:5])
+    %% ==============================
+    S_MENU --> S_INPUTER    : sw=001
+    S_MENU --> S_GENERATOR  : sw=010
+    S_MENU --> S_DISPLAYER  : sw=011
+    S_MENU --> OPERATOR_GRP : sw=100
+    S_MENU --> SETTINGS_GRP : sw=101
 
-    S_INPUTER --> S_MENU 
-    S_GENERATOR --> S_MENU
-    S_DISPLAYER --> S_MENU 
-    S_OPERATOR --> S_MENU 
-    S_SETTINGS --> S_MENU 
+    %% ==============================
+    %% 2. 单层功能状态
+    %% ==============================
+    S_INPUTER --> S_MENU : sw=000
+    S_GENERATOR --> S_MENU : sw=000
+    S_DISPLAYER --> S_MENU : sw=000
 
+    %% ==============================
+    %% 3. Operator 复合状态组
+    %% ==============================
+    state OPERATOR_GRP {
+        [*] --> S_OPERATOR
+        
+        %% 在 Operator 模式下再次按下 Confirm 进入子功能
+        S_OPERATOR --> S_OP_T : sw_op=000
+        S_OPERATOR --> S_OP_A : sw_op=001
+        S_OPERATOR --> S_OP_B : sw_op=010
+        S_OPERATOR --> S_OP_C : sw_op=011
+        S_OPERATOR --> S_OP_J : sw_op=100
+
+        %% 子功能之间也可以互相跳转 (只要 sw_menu 保持 100)
+        S_OP_T --> S_OP_A : sw_op change
+        S_OP_A --> S_OP_B : sw_op change
+        %% ... (简化连线，实际上互通)
+    }
+    %% 从组内任意状态返回菜单
+    OPERATOR_GRP --> S_MENU : sw=000
+
+    %% ==============================
+    %% 4. Settings 复合状态组
+    %% ==============================
+    state SETTINGS_GRP {
+        [*] --> S_SETTINGS
+
+        %% 在 Settings 模式下再次按下 Confirm 进入子设置
+        S_SETTINGS --> S_SE_n : sw_set=00
+        S_SETTINGS --> S_SE_c : sw_set=01
+        S_SETTINGS --> S_SE_r : sw_set=10
+        
+        %% 子设置之间互相跳转
+        S_SE_n --> S_SE_c : sw_set change
+    }
+    %% 从组内任意状态返回菜单
+    SETTINGS_GRP --> S_MENU : sw=000
 ```
 ---
 
