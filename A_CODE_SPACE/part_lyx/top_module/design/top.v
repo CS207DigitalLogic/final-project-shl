@@ -18,11 +18,11 @@ module top (
 
     // Switches
     input wire [7:0] sw,     // sw[7:5] menu select, sw[4:3] settings, sw[2:0] op mode
-    input wire [2:0] sw_scalar, 
+    input wire [3:0] sw_scalar, 
 
     // Buttons
-    input wire S3_confirm,   // confirm button (active high)
-    input wire S0_send,      // UART send button
+    input wire btn_confirm,   // confirm button (active high)
+    input wire btn_send,      // UART send button
 
     // UART physical IO
     input  wire uart_rx,
@@ -64,7 +64,7 @@ wire confirm_flag;  // single-cycle pulse for FSM
 debounce u_db_confirm(
     .clk(clk),
     .rst_n(rst_n),
-    .key_in(S3_confirm),
+    .key_in(btn_confirm),
     .key_flag(confirm_flag)
 );
 
@@ -73,7 +73,7 @@ wire send_flag;     // single-cycle pulse for UART TX
 debounce u_db_send(
     .clk(clk),
     .rst_n(rst_n),
-    .key_in(S0_send),
+    .key_in(btn_send),
     .key_flag(send_flag)
 );
 
@@ -412,7 +412,7 @@ seg_scan u_seg_scan (
 );
 
 //======================================================================
-// 8. Final seven-segment output mapping (VERY clean)
+// 8. Final seven-segment output mapping 
 //======================================================================
 always @(*) begin
     // ------------- DK1-DK4 (seg0 bus) -----------------

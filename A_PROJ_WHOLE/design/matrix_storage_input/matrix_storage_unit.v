@@ -1,0 +1,351 @@
+//storage, input parsing, and random generation of matrices for a calculator system.
+`timescale 1ns / 1ps
+module matrix_storage_unit (
+    input wire clk,
+    input wire rst_n,
+
+    // 1. 控制信号
+    input wire [3:0] current_state, // 外部传入的状态 (state)
+    input wire confirm_signal,      // 外部传入的确认信号 (confirm_flag)
+
+    // 2. 数据输入源 (UART)
+    input wire [7:0] uart_rx_data,
+    input wire       uart_rx_done,
+
+    // 3. 数据输出 (提供给 Calculator 和 Display)
+    // 读端口 A
+    input wire [2:0]  read_id_A,      
+    output wire [2:0] dim_row_A,      
+    output wire [2:0] dim_col_A,      
+    input wire [4:0]  read_addr_A,    
+    output wire [3:0] read_data_A,    
+
+    // 读端口 B
+    input wire [2:0]  read_id_B,
+    output wire [2:0] dim_row_B,
+    output wire [2:0] dim_col_B,
+    input wire [4:0]  read_addr_B,
+    output wire [3:0] read_data_B,
+
+    // 4. 状态反馈
+    output reg        input_error,    // 改为 reg 以便在 always 中赋值
+    output wire [2:0] mat_count_out   // 当前存了几个矩阵
+);
+
+    //==========================================================================
+    // 0. 参数与内部变量定义
+    //==========================================================================
+    // 必须在模块内部定义这些参数，或者通过 parameter 传入
+    localparam MAX_MATRICES = 4;
+    
+    // 状态机编码 (需与 Top 保持一致)
+    localparam S_INPUTER   = 4'd1;
+    localparam S_GENERATOR = 4'd2;
+
+    // 存储堆
+    reg [3:0]  mem_data [0:MAX_MATRICES-1][0:24];
+    reg [2:0]  mem_rows [0:MAX_MATRICES-1];
+    reg [2:0]  mem_cols [0:MAX_MATRICES-1];
+    reg [2:0]  mat_count;
+
+    // 状态机定义
+    localparam RX_IDLE     = 3'd0;
+    localparam RX_ROW      = 3'd1;
+    localparam RX_DATA     = 3'd2;
+    localparam RX_OVERFLOW = 3'd3;
+    localparam RX_CONFIRM  = 3'd4;
+    localparam RX_CLEAR    = 3'd5; // 清空状态,收到行/列指令 花 25 个周期把这块地全填0, 再写数据
+    
+    localparam GEN_IDLE    = 3'd0;
+    localparam GEN_ROW     = 3'd1;
+    localparam GEN_COL     = 3'd2;
+    localparam GEN_COUNT   = 3'd3;
+    localparam GEN_WORKING = 3'd4;
+    localparam GEN_DONE    = 3'd5;
+
+    reg [2:0] rx_state;
+    reg [2:0] gen_state;
+
+    // 通用变量
+    reg [1:0] curr_mat_id;
+    reg [2:0] curr_row, curr_col;
+    reg [2:0] target_rows, target_cols;
+    reg [4:0] elem_count;
+    reg [4:0] total_elements;
+    reg       input_complete;
+
+    // Generator 变量
+    reg [2:0] gen_rows, gen_cols;
+    reg [1:0] gen_mat_count_target;
+    reg [1:0] gen_mat_idx;
+    reg [4:0] gen_elem_idx;
+    reg [1:0] gen_slot;
+
+    //==========================================================================
+    // 1. 读取逻辑
+    //==========================================================================
+    assign mat_count_out = mat_count;
+
+    // Port A 读取
+    assign dim_row_A   = mem_rows[read_id_A];
+    assign dim_col_A   = mem_cols[read_id_A];
+    assign read_data_A = mem_data[read_id_A][read_addr_A];
+
+    // Port B 读取
+    assign dim_row_B   = mem_rows[read_id_B];
+    assign dim_col_B   = mem_cols[read_id_B];
+    assign read_data_B = mem_data[read_id_B][read_addr_B];
+
+    //==========================================================================
+    // 2. 辅助函数
+    //==========================================================================
+    function [1:0] find_slot;
+        input [2:0] rows, cols;
+        reg [1:0] slot;
+        reg found;
+        integer k;
+        begin
+            slot = 0;
+            found = 0;
+            // 优先找空槽
+            for (k = 0; k < MAX_MATRICES && !found; k = k + 1) begin
+                if (mem_rows[k] == 0 && mem_cols[k] == 0) begin
+                    slot = k[1:0];
+                    found = 1;
+                end
+            end
+            // 找同规格覆盖
+            if (!found) begin
+                for (k = 0; k < MAX_MATRICES && !found; k = k + 1) begin
+                    if (mem_rows[k] == rows && mem_cols[k] == cols) begin
+                        slot = k[1:0];
+                        found = 1;
+                    end
+                end
+            end
+            // 循环覆盖
+            if (!found) begin
+                slot = curr_mat_id; // 简单回退策略
+            end
+            find_slot = slot;
+        end
+    endfunction
+
+    //==========================================================================
+    // 3. LFSR 随机数生成
+    //==========================================================================
+    reg [15:0] lfsr;
+    wire [3:0] random_digit = lfsr[3:0] % 10;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) lfsr <= 16'hACE1;
+        else lfsr <= {lfsr[14:0], lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10]};
+    end
+
+    //==========================================================================
+    // 4. 核心控制逻辑 (Inputer + Generator 合并)
+    //==========================================================================
+    // 将所有对 mem_data 的写操作合并到一个 always 块中，防止多重驱动错误
+    integer idx;
+    
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            // 全局复位
+            rx_state <= RX_IDLE;
+            gen_state <= GEN_IDLE;
+            curr_mat_id <= 2'd0;
+            curr_row <= 3'd0;
+            curr_col <= 3'd0;
+            target_rows <= 3'd0;
+            target_cols <= 3'd0;
+            elem_count <= 5'd0;
+            total_elements <= 5'd0;
+            input_error <= 1'b0;
+            input_complete <= 1'b0;
+            mat_count <= 3'd0;
+            
+            // Generator 复位
+            gen_rows <= 3'd0;
+            gen_cols <= 3'd0;
+            gen_mat_count_target <= 2'd0;
+            gen_mat_idx <= 2'd0;
+            gen_elem_idx <= 5'd0;
+            gen_slot <= 2'd0;
+
+            // 内存初始化 (可选)
+            for (idx = 0; idx < MAX_MATRICES; idx = idx + 1) begin
+                mem_rows[idx] <= 0;
+                mem_cols[idx] <= 0;
+            end
+
+        end else begin
+            // 默认信号
+            input_complete <= 1'b0;
+
+            // -----------------------------------------------------------------
+            // A. INPUTER 模式逻辑
+            // -----------------------------------------------------------------
+            if (current_state == S_INPUTER) begin
+                // 重置 Generator 状态
+                gen_state <= GEN_IDLE;
+
+                case (rx_state)
+                    RX_IDLE: begin
+                        if (uart_rx_done) begin
+                            if (uart_rx_data >= 8'd1 && uart_rx_data <= 8'd5) begin
+                                target_rows <= uart_rx_data[2:0];
+                                input_error <= 1'b0;
+                                rx_state <= RX_ROW;
+                            end else if (uart_rx_data != 8'd0) begin
+                                input_error <= 1'b1;
+                            end
+                        end
+                    end
+                    RX_ROW: begin
+                        if (uart_rx_done) begin
+                            if (uart_rx_data >= 8'd1 && uart_rx_data <= 8'd5) begin
+                                target_cols <= uart_rx_data[2:0];
+                                total_elements <= target_rows * uart_rx_data[2:0];
+                                curr_mat_id <= find_slot(target_rows, uart_rx_data[2:0]);
+                                // 【关键修改】不直接去 RX_DATA，先去 RX_CLEAR
+                                // 借用 elem_count 来做清空计数器，先置0
+                                elem_count <= 5'd0; 
+                                rx_state <= RX_CLEAR;
+                            end else begin
+                                input_error <= 1'b1;
+                                rx_state <= RX_IDLE;
+                            end
+                        end
+                    end
+
+                    //清空状态：把当前矩阵的 25 个格子全写 0
+                    RX_CLEAR: begin
+                        // 循环 25 次
+                        if (elem_count < 25) begin
+                            mem_data[curr_mat_id][elem_count] <= 4'd0;
+                            elem_count <= elem_count + 1;
+                        end else begin
+                            // 清空完毕，正式开始录入
+                            rx_state <= RX_DATA;
+                            
+                            // 重置计数器给 RX_DATA 使用
+                            curr_row <= 3'd0;
+                            curr_col <= 3'd0;
+                            elem_count <= 5'd0;
+                        end
+                    end
+
+                    RX_DATA: begin
+                        if (uart_rx_done) begin
+                            if (elem_count < total_elements) begin
+                                if (uart_rx_data <= 8'd9) begin
+                                    mem_data[curr_mat_id][curr_row * 5 + curr_col] <= uart_rx_data[3:0];
+                                    input_error <= 1'b0;
+                                    elem_count <= elem_count + 1;
+                                    
+                                    // 位置更新
+                                    if (curr_col == target_cols - 1) begin
+                                        curr_col <= 3'd0;
+                                        curr_row <= curr_row + 1;
+                                    end else begin
+                                        curr_col <= curr_col + 1;
+                                    end
+
+                                    if (elem_count + 1 == total_elements) 
+                                        rx_state <= RX_CONFIRM;
+                                end else begin
+                                    input_error <= 1'b1;
+                                end
+                            end else begin
+                                rx_state <= RX_OVERFLOW;
+                            end
+                        end
+
+                        // 提前按confirm
+                        if (confirm_signal && elem_count < total_elements) begin
+                            rx_state <= RX_CONFIRM; 
+                        end
+                    end
+                    RX_OVERFLOW: begin
+                        if (confirm_signal) rx_state <= RX_CONFIRM;
+                    end
+                    RX_CONFIRM: begin
+                        mem_rows[curr_mat_id] <= target_rows;
+                        mem_cols[curr_mat_id] <= target_cols;
+                        if (mat_count < MAX_MATRICES) mat_count <= mat_count + 1;
+                        input_complete <= 1'b1;
+                        rx_state <= RX_IDLE;
+                        
+                        target_rows <= 3'd0;
+                        target_cols <= 3'd0;
+                        elem_count <= 5'd0;
+                    end
+                endcase
+            end
+
+            // -----------------------------------------------------------------
+            // B. GENERATOR 模式逻辑
+            // -----------------------------------------------------------------
+            else if (current_state == S_GENERATOR) begin
+                // 重置 Inputer 状态
+                rx_state <= RX_IDLE;
+                input_error <= 1'b0;
+
+                case (gen_state)
+                    GEN_IDLE: begin
+                        if (uart_rx_done && uart_rx_data >= 8'd1 && uart_rx_data <= 8'd5) begin
+                            gen_rows <= uart_rx_data[2:0];
+                            gen_state <= GEN_COL;
+                        end
+                    end
+                    GEN_COL: begin
+                        if (uart_rx_done && uart_rx_data >= 8'd1 && uart_rx_data <= 8'd5) begin
+                            gen_cols <= uart_rx_data[2:0];
+                            gen_state <= GEN_COUNT;
+                        end
+                    end
+                    GEN_COUNT: begin
+                        if (uart_rx_done && uart_rx_data >= 8'd1 && uart_rx_data <= 8'd2) begin
+                            gen_mat_count_target <= uart_rx_data[1:0];
+                            gen_mat_idx <= 2'd0;
+                            gen_elem_idx <= 5'd0;
+                            gen_slot <= find_slot(gen_rows, gen_cols);
+                            gen_state <= GEN_WORKING;
+                        end
+                    end
+                    GEN_WORKING: begin
+                        if (gen_elem_idx < gen_rows * gen_cols) begin
+                            mem_data[gen_slot][gen_elem_idx] <= random_digit;
+                            gen_elem_idx <= gen_elem_idx + 1;
+                        end else begin
+                            mem_rows[gen_slot] <= gen_rows;
+                            mem_cols[gen_slot] <= gen_cols;
+                            if (mat_count < MAX_MATRICES) mat_count <= mat_count + 1;
+
+                            if (gen_mat_idx + 1 < gen_mat_count_target) begin
+                                gen_mat_idx <= gen_mat_idx + 1;
+                                gen_elem_idx <= 5'd0;
+                                gen_slot <= find_slot(gen_rows, gen_cols);
+                            end else begin
+                                gen_state <= GEN_DONE;
+                            end
+                        end
+                    end
+                    GEN_DONE: begin
+                        if (confirm_signal) gen_state <= GEN_IDLE;
+                    end
+                endcase
+            end
+
+            // -----------------------------------------------------------------
+            // C. 其他模式 (Reset 临时状态)
+            // -----------------------------------------------------------------
+            else begin
+                rx_state <= RX_IDLE;
+                gen_state <= GEN_IDLE;
+                input_error <= 1'b0;
+            end
+        end
+    end
+
+endmodule

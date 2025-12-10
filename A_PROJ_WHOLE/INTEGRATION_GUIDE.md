@@ -105,7 +105,7 @@ multiplexer_validator u_mul_val (
 | 信号 | 引脚 | 说明 |
 |------|------|------|
 | sw[7:0] | SW7-SW0 | 拨码开关 |
-| sw_scalar[3:0] | SW11-SW8 | 标量/倒计时设置 |
+| sw_scalar_count_down[3:0] | SW11-SW8 | 标量/倒计时设置 |
 | btn_confirm | S3 | 确认键 |
 | btn_send | S0 | UART发送键 |
 | uart_rx | 指定RX引脚 | UART接收 |

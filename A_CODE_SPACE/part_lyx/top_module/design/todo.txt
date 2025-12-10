@@ -1,0 +1,1 @@
+1. 绑定sw_count_down,注意位宽
