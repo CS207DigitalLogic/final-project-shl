@@ -136,20 +136,69 @@ module integrated_top (
     reg [2:0]  mem_rows [0:MAX_MATRICES-1];        // 行数
     reg [2:0]  mem_cols [0:MAX_MATRICES-1];        // 列数
     reg [2:0]  mat_count;                          // 矩阵总数
+    
+    // 同规格矩阵覆盖索引 (每种规格最多存2个，循环覆盖)
+    reg [4:0]  dim_write_idx [0:24];  // 25种规格(1-5 x 1-5)的写入索引
 
     //==========================================================================
     // 矩阵输入解析器 (UART RX -> 存储)
+    // 支持功能：
+    // 1. 维度检测 (1-5)
+    // 2. 元素值检测 (0-9)
+    // 3. 元素不足时补0
+    // 4. 元素超出时忽略
+    // 5. 同规格矩阵循环覆盖
     //==========================================================================
-    localparam RX_IDLE = 3'd0;
-    localparam RX_ROW  = 3'd1;
-    localparam RX_COL  = 3'd2;
-    localparam RX_DATA = 3'd3;
+    localparam RX_IDLE     = 3'd0;  // 等待输入
+    localparam RX_ROW      = 3'd1;  // 已收到行数，等待列数
+    localparam RX_DATA     = 3'd2;  // 正在接收数据
+    localparam RX_OVERFLOW = 3'd3;  // 数据溢出，忽略多余输入
+    localparam RX_CONFIRM  = 3'd4;  // 等待确认键完成输入
 
     reg [2:0] rx_state;
     reg [1:0] curr_mat_id;           // 当前录入的矩阵ID
     reg [2:0] curr_row, curr_col;    // 当前录入位置
     reg [2:0] target_rows, target_cols;
+    reg [4:0] elem_count;            // 已输入元素计数
+    reg [4:0] total_elements;        // 总共需要的元素数
     reg       input_error;           // 输入错误标志
+    reg       input_complete;        // 输入完成标志
+
+    // 计算同规格矩阵的存储位置
+    wire [4:0] dim_key = (target_rows - 1) * 5 + (target_cols - 1);  // 0-24
+
+    // 查找可用的矩阵槽位 (同规格覆盖逻辑)
+    function [1:0] find_slot;
+        input [2:0] rows, cols;
+        reg [1:0] slot;
+        reg found;
+        integer i;
+        begin
+            slot = 0;
+            found = 0;
+            // 优先找空槽
+            for (i = 0; i < MAX_MATRICES && !found; i = i + 1) begin
+                if (mem_rows[i] == 0 && mem_cols[i] == 0) begin
+                    slot = i[1:0];
+                    found = 1;
+                end
+            end
+            // 如果没有空槽，找同规格的覆盖
+            if (!found) begin
+                for (i = 0; i < MAX_MATRICES && !found; i = i + 1) begin
+                    if (mem_rows[i] == rows && mem_cols[i] == cols) begin
+                        slot = i[1:0];
+                        found = 1;
+                    end
+                end
+            end
+            // 如果还没找到，循环覆盖最早的
+            if (!found) begin
+                slot = curr_mat_id;
+            end
+            find_slot = slot;
+        end
+    endfunction
 
     // 矩阵输入状态机
     always @(posedge clk or negedge rst_n) begin
@@ -160,68 +209,241 @@ module integrated_top (
             curr_col <= 3'd0;
             target_rows <= 3'd0;
             target_cols <= 3'd0;
+            elem_count <= 5'd0;
+            total_elements <= 5'd0;
             input_error <= 1'b0;
-        end else if (state == S_INPUTER && uart_rx_done) begin
+            input_complete <= 1'b0;
+        end else if (state == S_INPUTER) begin
+            input_complete <= 1'b0;
+            
             case (rx_state)
                 RX_IDLE: begin
-                    // 等待输入行数
-                    if (uart_rx_data >= 8'd1 && uart_rx_data <= 8'd5) begin
-                        target_rows <= uart_rx_data[2:0];
-                        input_error <= 1'b0;
-                        rx_state <= RX_COL;
-                    end else begin
-                        input_error <= 1'b1;  // 维度错误
+                    if (uart_rx_done) begin
+                        // 等待输入行数
+                        if (uart_rx_data >= 8'd1 && uart_rx_data <= 8'd5) begin
+                            target_rows <= uart_rx_data[2:0];
+                            input_error <= 1'b0;
+                            rx_state <= RX_ROW;
+                        end else if (uart_rx_data != 8'd0) begin
+                            input_error <= 1'b1;  // 维度错误
+                        end
                     end
                 end
 
-                RX_COL: begin
-                    // 等待输入列数
-                    if (uart_rx_data >= 8'd1 && uart_rx_data <= 8'd5) begin
-                        target_cols <= uart_rx_data[2:0];
-                        mem_rows[curr_mat_id] <= target_rows;
-                        mem_cols[curr_mat_id] <= uart_rx_data[2:0];
-                        curr_row <= 3'd0;
-                        curr_col <= 3'd0;
-                        input_error <= 1'b0;
-                        rx_state <= RX_DATA;
-                    end else begin
-                        input_error <= 1'b1;
+                RX_ROW: begin
+                    if (uart_rx_done) begin
+                        // 等待输入列数
+                        if (uart_rx_data >= 8'd1 && uart_rx_data <= 8'd5) begin
+                            target_cols <= uart_rx_data[2:0];
+                            total_elements <= target_rows * uart_rx_data[2:0];
+                            
+                            // 查找存储槽位
+                            curr_mat_id <= find_slot(target_rows, uart_rx_data[2:0]);
+                            
+                            // 初始化该矩阵的所有元素为0 (处理元素不足情况)
+                            // 注意: 这里简化处理，实际在存储时逐个初始化
+                            
+                            curr_row <= 3'd0;
+                            curr_col <= 3'd0;
+                            elem_count <= 5'd0;
+                            input_error <= 1'b0;
+                            rx_state <= RX_DATA;
+                        end else begin
+                            input_error <= 1'b1;
+                            rx_state <= RX_IDLE;  // 返回初始状态
+                        end
                     end
                 end
 
                 RX_DATA: begin
-                    // 输入矩阵元素
-                    if (uart_rx_data <= 8'd9) begin
-                        mem_data[curr_mat_id][curr_row * 5 + curr_col] <= uart_rx_data[3:0];
-                        input_error <= 1'b0;
+                    if (uart_rx_done) begin
+                        if (elem_count < total_elements) begin
+                            // 还需要更多元素
+                            if (uart_rx_data <= 8'd9) begin
+                                mem_data[curr_mat_id][curr_row * 5 + curr_col] <= uart_rx_data[3:0];
+                                input_error <= 1'b0;
+                                elem_count <= elem_count + 1;
 
-                        // 更新位置
-                        if (curr_col == target_cols - 1) begin
-                            curr_col <= 3'd0;
-                            if (curr_row == target_rows - 1) begin
-                                // 矩阵输入完成
-                                rx_state <= RX_IDLE;
-                                if (curr_mat_id < MAX_MATRICES - 1)
-                                    curr_mat_id <= curr_mat_id + 1;
-                                else
-                                    curr_mat_id <= 2'd0;  // 循环覆盖
+                                // 更新位置
+                                if (curr_col == target_cols - 1) begin
+                                    curr_col <= 3'd0;
+                                    curr_row <= curr_row + 1;
+                                end else begin
+                                    curr_col <= curr_col + 1;
+                                end
                                 
-                                // 更新矩阵计数
-                                if (mat_count < MAX_MATRICES)
-                                    mat_count <= mat_count + 1;
+                                // 检查是否收集完毕
+                                if (elem_count + 1 == total_elements) begin
+                                    rx_state <= RX_CONFIRM;
+                                end
                             end else begin
-                                curr_row <= curr_row + 1;
+                                input_error <= 1'b1;  // 元素值错误，但继续等待
                             end
                         end else begin
-                            curr_col <= curr_col + 1;
+                            // 元素已足够，进入溢出模式
+                            rx_state <= RX_OVERFLOW;
                         end
+                    end
+                    
+                    // 用户按确认键提前结束输入 (元素不足时补0)
+                    if (confirm_pulse) begin
+                        // 补齐剩余元素为0
+                        rx_state <= RX_CONFIRM;
+                    end
+                end
+
+                RX_OVERFLOW: begin
+                    // 忽略多余的输入，等待确认键结束
+                    if (confirm_pulse) begin
+                        rx_state <= RX_CONFIRM;
+                    end
+                end
+
+                RX_CONFIRM: begin
+                    // 完成矩阵存储
+                    mem_rows[curr_mat_id] <= target_rows;
+                    mem_cols[curr_mat_id] <= target_cols;
+                    
+                    // 更新矩阵计数
+                    if (mat_count < MAX_MATRICES) begin
+                        mat_count <= mat_count + 1;
+                    end
+                    
+                    input_complete <= 1'b1;
+                    rx_state <= RX_IDLE;
+                    
+                    // 准备下一个矩阵
+                    target_rows <= 3'd0;
+                    target_cols <= 3'd0;
+                    elem_count <= 5'd0;
+                end
+            endcase
+            
+        end else begin
+            // 不在输入模式时重置状态
+            rx_state <= RX_IDLE;
+            input_error <= 1'b0;
+        end
+    end
+    
+    // 元素不足时的补0逻辑 (在确认时执行)
+    integer idx;
+    always @(posedge clk) begin
+        if (rx_state == RX_DATA && confirm_pulse && elem_count < total_elements) begin
+            // 将未填充的位置清零
+            for (idx = 0; idx < 25; idx = idx + 1) begin
+                if (idx >= elem_count && idx < total_elements) begin
+                    mem_data[curr_mat_id][idx] <= 4'd0;
+                end
+            end
+        end
+    end
+
+    //==========================================================================
+    // 矩阵随机生成器 (S_GENERATOR 模式)
+    //==========================================================================
+    localparam GEN_IDLE    = 3'd0;
+    localparam GEN_ROW     = 3'd1;
+    localparam GEN_COL     = 3'd2;
+    localparam GEN_COUNT   = 3'd3;
+    localparam GEN_WORKING = 3'd4;
+    localparam GEN_DONE    = 3'd5;
+    
+    reg [2:0] gen_state;
+    reg [2:0] gen_rows, gen_cols;
+    reg [1:0] gen_mat_count;        // 要生成的矩阵数量 (1-2)
+    reg [1:0] gen_mat_idx;          // 当前生成第几个
+    reg [4:0] gen_elem_idx;         // 当前生成第几个元素
+    reg [1:0] gen_slot;             // 存储槽位
+    
+    // LFSR 随机数生成器
+    reg [15:0] lfsr;
+    wire [3:0] random_digit = lfsr[3:0] % 10;  // 0-9 随机数
+    
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            lfsr <= 16'hACE1;  // 非零初始种子
+        end else begin
+            // x^16 + x^14 + x^13 + x^11 + 1
+            lfsr <= {lfsr[14:0], lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10]};
+        end
+    end
+    
+    // 生成状态机
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            gen_state <= GEN_IDLE;
+            gen_rows <= 3'd0;
+            gen_cols <= 3'd0;
+            gen_mat_count <= 2'd0;
+            gen_mat_idx <= 2'd0;
+            gen_elem_idx <= 5'd0;
+            gen_slot <= 2'd0;
+        end else if (state == S_GENERATOR) begin
+            case (gen_state)
+                GEN_IDLE: begin
+                    if (uart_rx_done) begin
+                        if (uart_rx_data >= 8'd1 && uart_rx_data <= 8'd5) begin
+                            gen_rows <= uart_rx_data[2:0];
+                            gen_state <= GEN_COL;
+                        end
+                    end
+                end
+                
+                GEN_COL: begin
+                    if (uart_rx_done) begin
+                        if (uart_rx_data >= 8'd1 && uart_rx_data <= 8'd5) begin
+                            gen_cols <= uart_rx_data[2:0];
+                            gen_state <= GEN_COUNT;
+                        end
+                    end
+                end
+                
+                GEN_COUNT: begin
+                    if (uart_rx_done) begin
+                        if (uart_rx_data >= 8'd1 && uart_rx_data <= 8'd2) begin
+                            gen_mat_count <= uart_rx_data[1:0];
+                            gen_mat_idx <= 2'd0;
+                            gen_elem_idx <= 5'd0;
+                            gen_slot <= find_slot(gen_rows, gen_cols);
+                            gen_state <= GEN_WORKING;
+                        end
+                    end
+                end
+                
+                GEN_WORKING: begin
+                    // 每个时钟周期生成一个元素
+                    if (gen_elem_idx < gen_rows * gen_cols) begin
+                        mem_data[gen_slot][gen_elem_idx] <= random_digit;
+                        gen_elem_idx <= gen_elem_idx + 1;
                     end else begin
-                        input_error <= 1'b1;  // 元素值错误
+                        // 当前矩阵生成完成
+                        mem_rows[gen_slot] <= gen_rows;
+                        mem_cols[gen_slot] <= gen_cols;
+                        
+                        if (mat_count < MAX_MATRICES)
+                            mat_count <= mat_count + 1;
+                        
+                        if (gen_mat_idx + 1 < gen_mat_count) begin
+                            // 还需要生成更多矩阵
+                            gen_mat_idx <= gen_mat_idx + 1;
+                            gen_elem_idx <= 5'd0;
+                            gen_slot <= find_slot(gen_rows, gen_cols);
+                        end else begin
+                            gen_state <= GEN_DONE;
+                        end
+                    end
+                end
+                
+                GEN_DONE: begin
+                    // 等待确认后返回
+                    if (confirm_pulse) begin
+                        gen_state <= GEN_IDLE;
                     end
                 end
             endcase
-        end else if (state != S_INPUTER) begin
-            rx_state <= RX_IDLE;
+        end else begin
+            gen_state <= GEN_IDLE;
         end
     end
 
