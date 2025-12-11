@@ -49,7 +49,7 @@ always @(posedge clk or negedge rst_n) begin
                 if (button_sync1 == 0) begin  // 按键释放
                     state <= IDLE;
                 end else if (counter == DEBOUNCE_TIME) begin  // 消抖完成
-                    state <= HOLD;
+                    state <= WAIT;
                     button_out <= 1;  // 输出一个脉冲
                 end else begin
                     counter <= counter + 1;
