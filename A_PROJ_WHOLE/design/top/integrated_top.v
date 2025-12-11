@@ -146,17 +146,30 @@ uart_rx #(
 );
 
 // UART TX
-reg  [7:0] tx_data_reg;
-reg        tx_start_reg;
+wire [7:0] tx_data_mux;
+wire       tx_start_mux;
 wire       tx_busy;
+
+// 矩阵展示模块的 UART 信号
+wire [7:0] display_tx_data;
+wire       display_tx_start;
+wire       display_busy;
+wire       display_done;
+wire [2:0] display_read_id;
+wire [4:0] display_read_addr;
+
+// UART TX 多路复用: 当矩阵展示模块忙时使用其输出
+assign tx_data_mux  = display_busy ? display_tx_data  : 8'd0;
+assign tx_start_mux = display_busy ? display_tx_start : 1'b0;
+
 uart_tx #(
     .CLK_FREQ(CLK_FREQ),
     .BAUD_RATE(BAUD_RATE)
 ) u_uart_tx (
     .clk(clk),
     .rst_n(rst_n),
-    .tx_start(tx_start_reg),
-    .tx_data(tx_data_reg),
+    .tx_start(tx_start_mux),
+    .tx_data(tx_data_mux),
     .tx(uart_tx),
     .tx_busy(tx_busy)
 );
@@ -164,8 +177,14 @@ uart_tx #(
 //==========================================================================
 // 6. 矩阵存储单元实例化 (Matrix Storage Unit)
 //==========================================================================
-// 如果还没有定义运算地址控制逻辑，暂时可以 assign read_addr_A = 0;
-assign read_addr_A = 5'd0;
+// 地址选择: 展示模块工作时使用其地址，否则使用运算地址
+wire [4:0] read_addr_A_calc = 5'd0; // 计算模块的地址 (待实现)
+wire [4:0] read_addr_B_calc = 5'd0; // 计算模块的地址 (待实现)
+
+// 读取 ID 选择: 展示模块工作时使用其 ID
+wire [2:0] read_id_A_mux;
+assign read_addr_A = display_busy ? display_read_addr : read_addr_A_calc;
+assign read_id_A_mux = display_busy ? display_read_id : operand1_id;
 assign read_addr_B = 5'd0;
 
 matrix_storage_unit u_matrix_store (
@@ -180,8 +199,8 @@ matrix_storage_unit u_matrix_store (
     .uart_rx_data   (uart_rx_data),
     .uart_rx_done   (uart_rx_done),  
 
-    // 3. 数据输出 - 端口 A (连接到 Operand 1)
-    .read_id_A      (operand1_id),   // 顶层定义的运算数1选择子
+    // 3. 数据输出 - 端口 A (连接到 Operand 1 / 展示模块)
+    .read_id_A      (read_id_A_mux), // 展示时使用展示模块ID，否则使用operand1_id
     .dim_row_A      (dim_row_A),     // 输出：矩阵1的行数
     .dim_col_A      (dim_col_A),     // 输出：矩阵1的列数
     .read_addr_A    (read_addr_A),   // 输入：计算器想读哪个格子(0-24)
