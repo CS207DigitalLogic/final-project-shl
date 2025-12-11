@@ -76,17 +76,21 @@ set_property IOSTANDARD LVCMOS33 [get_ports LED0_uart_rx]
 set_property PACKAGE_PIN M1 [get_ports LED1_uart_tx]
 set_property IOSTANDARD LVCMOS33 [get_ports LED1_uart_tx]
 
-# LED5_dim_err
-set_property PACKAGE_PIN G3 [get_ports LED5_dim_err]
-set_property IOSTANDARD LVCMOS33 [get_ports LED5_dim_err]
+# led_err
+set_property PACKAGE_PIN F6 [get_ports led_error]
+set_property IOSTANDARD LVCMOS33 [get_ports led_error]
 
-# LED4_val_err
-set_property PACKAGE_PIN J4 [get_ports LED4_val_err]
-set_property IOSTANDARD LVCMOS33 [get_ports LED4_val_err]
+# led_idle
+set_property PACKAGE_PIN G4 [get_ports led_idle]
+set_property IOSTANDARD LVCMOS33 [get_ports led_idle]
 
-# LED3_op_err
-set_property PACKAGE_PIN H4 [get_ports LED3_op_err]
-set_property IOSTANDARD LVCMOS33 [get_ports LED3_op_err]
+# led_busy
+set_property PACKAGE_PIN G3 [get_ports led_busy]
+set_property IOSTANDARD LVCMOS33 [get_ports led_busy]
+
+# led_done
+set_property PACKAGE_PIN J4 [get_ports led_done]
+set_property IOSTANDARD LVCMOS33 [get_ports led_done]
 
 # ================= 7-segment display ===============
 
