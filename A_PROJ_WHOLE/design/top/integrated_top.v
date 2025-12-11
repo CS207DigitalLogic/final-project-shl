@@ -26,14 +26,10 @@ module integrated_top (
     input  wire uart_rx_rst_n,   // UART RX reset (active low)
 
     // LED 
-    output wire led_error,       // 运算错误
+    output reg led_error,       // 错误指示
     output wire led_idle,        // 空闲状态
     output wire led_busy,        // 忙碌状态
     output wire led_done,        // 完成指示
-    
-    output reg LED5_dim_err,      // input error: dimension overflow
-    output reg LED4_val_err,      // input error: value overflow
-    output reg LED3_op_err,       // operator error: invalid operation
 
     output reg LED1_uart_tx,      // UART TX working indicator
     output reg LED0_uart_rx,      // UART RX working indicator
@@ -204,48 +200,32 @@ matrix_storage_unit u_matrix_store (
 );
 
 //==========================================================================
-// 倒计时器 (来自 part_hcz 的概念, 简化集成)
+// 7. 倒计时模块实例化
 //==========================================================================
-reg [31:0] countdown_counter;
-reg [3:0]  countdown_seconds;
-reg        countdown_active;
-reg        countdown_timeout;
-wire [3:0] countdown_setting = (count_down_input >= 4'd5 && count_down_input <= 4'd15) ? 
-                                count_down_input : 4'd10;
-always @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-        countdown_counter <= 32'd0;
-        countdown_seconds <= 4'd0;
-        countdown_active <= 1'b0;
-        countdown_timeout <= 1'b0;
-    end else begin
-        countdown_timeout <= 1'b0;
-        if (countdown_active) begin
-            if (countdown_counter >= CLK_FREQ - 1) begin
-                countdown_counter <= 32'd0;
-                if (countdown_seconds > 0) begin
-                    countdown_seconds <= countdown_seconds - 1;
-                end else begin
-                    countdown_active <= 1'b0;
-                    countdown_timeout <= 1'b1;
-                end
-            end else begin
-                countdown_counter <= countdown_counter + 1;
-            end
-        end
-    end
-end
-// 启动倒计时的控制信号
-reg start_countdown;
-always @(posedge clk) begin
-    if (start_countdown && !countdown_active) begin
-        countdown_active <= 1'b1;
-        countdown_seconds <= countdown_setting;
-        countdown_counter <= 32'd0;
-    end
-end
+wire [3:0] countdown_seconds; // 连接到数码管显示逻辑
+wire       countdown_active;  // 连接到 led_busy
+wire       countdown_timeout; // 如果后续需要处理超时事件(比如自动确认)，可以用这个
+
+// 定义启动信号
+// 注意：你需要逻辑来驱动 start_countdown，比如在检测到错误时拉高一个周期
+reg        start_countdown;   
+
+countdown_unit #(
+    .CLK_FREQ(100_000_000)    // 仿真时可以改为小数值
+) u_countdown (
+    .clk            (clk),
+    .rst_n          (rst_n),
+    
+    .start          (start_countdown), // 输入：启动脉冲
+    .setting_in     (count_down_input),// 输入：来自开关的设置值
+    
+    .current_seconds(countdown_seconds),// 输出：给 DK7/DK8 显示
+    .active         (countdown_active), // 输出：给 LED Busy
+    .timeout        (countdown_timeout) // 输出：结束脉冲
+);
+
 //==========================================================================
-// 运算数选择与验证
+// 8. 运算数选择与验证
 //==========================================================================
 reg       operands_valid;
 wire      add_valid, mul_valid;
@@ -268,6 +248,38 @@ multiplexer_validator u_mul_val (
     .result_row(mul_res_row),
     .result_col(mul_res_col)
 );
+
+//==========================================================================
+// 9. 倒计时触发控制
+//==========================================================================
+
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        start_countdown <= 1'b0;
+        led_error <= 1'b0; 
+    end else begin
+        start_countdown <= 1'b0;
+        if (confirm_flag) begin
+            case (state)
+                S_OP_A: begin
+                    if (!add_valid) begin
+                        start_countdown <= 1'b1;
+                        led_error <= 1'b1;
+                    end
+                end
+                
+                S_OP_C: begin
+                    if (!mul_valid) begin
+                        start_countdown <= 1'b1;
+                        led_error <= 1'b1;
+                    end
+                end
+                default: ; 
+            endcase
+        end
+    end
+end
+
 //==========================================================================
 // 矩阵计算核心 (来自 part_shl)
 //==========================================================================
@@ -447,7 +459,7 @@ end
 //==========================================================================
 // LED logic
 //==========================================================================
-assign led_error = storage_input_error;
+assign LED5_dim_err = storage_input_error;
 assign led_idle  = (state == S_MENU);
 assign led_busy  = countdown_active || (state >= S_OP_T && state <= S_OP_J);
 assign led_done  = calc_done;
@@ -458,14 +470,6 @@ always @(*) begin
     LED0_uart_rx = uart_rx_work;
 end
 
-
-// TODO: 实现error indicators
-// error indicators
-always @(*) begin
-    LED5_dim_err = 1'b0;
-    LED4_val_err = 1'b0;
-    LED3_op_err  = 1'b0;
-end
 
 //======================================================================
 // 5. Seven-segment display definitions
