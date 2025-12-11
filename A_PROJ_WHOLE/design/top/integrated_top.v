@@ -219,6 +219,57 @@ matrix_storage_unit u_matrix_store (
 );
 
 //==========================================================================
+// 6.5 矩阵 UART 展示模块实例化 (Matrix UART Display)
+//==========================================================================
+// 展示模块读取端口 (复用端口 A 的输出)
+wire [2:0] display_dim_row = dim_row_A;
+wire [2:0] display_dim_col = dim_col_A;
+wire [3:0] display_read_data = read_data_A;
+
+// 展示触发信号: 在 S_DISPLAYER 状态下按发送键
+reg display_start_pulse;
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        display_start_pulse <= 1'b0;
+    end else begin
+        display_start_pulse <= 1'b0;
+        if (state == S_DISPLAYER && send_flag && !display_busy) begin
+            display_start_pulse <= 1'b1;
+        end
+    end
+end
+
+// 展示所有矩阵 or 单个矩阵: sw[0] = 1 表示展示所有
+wire display_all_matrices = sw[0];
+
+matrix_uart_display u_matrix_display (
+    .clk            (clk),
+    .rst_n          (rst_n),
+    
+    // 控制信号
+    .start_display  (display_start_pulse),
+    .matrix_id      (operand1_id),          // 使用 sw_right[5:3] 选择要展示的矩阵
+    .display_all    (display_all_matrices), // sw[0]=1 展示所有矩阵
+    .mat_count      (storage_mat_count),
+    
+    // 矩阵数据接口 (连接到存储单元的端口 A)
+    .read_id        (display_read_id),
+    .read_addr      (display_read_addr),
+    .read_data      (display_read_data),
+    .dim_row        (display_dim_row),
+    .dim_col        (display_dim_col),
+    
+    // UART TX 接口
+    .tx_data        (display_tx_data),
+    .tx_start       (display_tx_start),
+    .tx_busy        (tx_busy),
+    
+    // 状态输出
+    .busy           (display_busy),
+    .done           (display_done)
+);
+
+//==========================================================================
 // 7. 倒计时模块实例化
 //==========================================================================
 wire [3:0] countdown_seconds; // 连接到数码管显示逻辑
@@ -278,6 +329,12 @@ always @(posedge clk or negedge rst_n) begin
         led_error <= 1'b0; 
     end else begin
         start_countdown <= 1'b0;
+        
+        // 当倒计时结束或返回菜单时，清除错误指示
+        if (countdown_timeout || state == S_MENU) begin
+            led_error <= 1'b0;
+        end
+        
         if (confirm_flag) begin
             case (state)
                 S_OP_A: begin
@@ -307,6 +364,19 @@ reg        calc_start;
 reg        calc_done;
 reg [15:0] calc_result [0:24];
 reg [2:0]  result_rows, result_cols;
+
+// 初始化 calc_start 和 calc_done (避免 LED 不稳定)
+// TODO: 当实现真正的计算模块时，这些信号应由计算模块驱动
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        calc_start <= 1'b0;
+        calc_done  <= 1'b0;
+    end else begin
+        // 暂时保持为 0，等待计算模块实现
+        calc_start <= 1'b0;
+        calc_done  <= 1'b0;
+    end
+end
 
 //==========================================================================
 // 主状态机

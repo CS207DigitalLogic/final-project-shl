@@ -1,9 +1,10 @@
 `timescale 1ns / 1ps
 //==============================================================================
 // matrix_uart_display.v
-// 矩阵 UART 展示模块
+// 矩阵 UART 展示模块 (修复版)
 // 功能: 将存储的矩阵通过 UART 以 ASCII 格式发送到电脑显示
 // 格式示例 (2x3 矩阵):
+//   M0:[2x3]
 //   4 5 6
 //   7 8 9
 //==============================================================================
@@ -42,13 +43,7 @@ module matrix_uart_display (
     localparam ASCII_SPACE = 8'h20;  // ' '
     localparam ASCII_CR    = 8'h0D;  // '\r'
     localparam ASCII_LF    = 8'h0A;  // '\n'
-    localparam ASCII_MINUS = 8'h2D;  // '-'
     localparam ASCII_M     = 8'h4D;  // 'M'
-    localparam ASCII_A     = 8'h41;  // 'A'
-    localparam ASCII_T     = 8'h54;  // 'T'
-    localparam ASCII_R     = 8'h52;  // 'R'
-    localparam ASCII_I     = 8'h49;  // 'I'
-    localparam ASCII_X     = 8'h58;  // 'X'
     localparam ASCII_COLON = 8'h3A;  // ':'
     localparam ASCII_LBRK  = 8'h5B;  // '['
     localparam ASCII_RBRK  = 8'h5D;  // ']'
@@ -58,17 +53,19 @@ module matrix_uart_display (
     // 状态机定义
     //==========================================================================
     localparam S_IDLE       = 4'd0;   // 空闲
-    localparam S_LOAD_DIM   = 4'd1;   // 加载矩阵维度
-    localparam S_SEND_HEADER= 4'd2;   // 发送标题 "MATRIX X:"
-    localparam S_SEND_DIM   = 4'd3;   // 发送维度 "[RxC]"
-    localparam S_SEND_NEWLINE1 = 4'd4;// 发送换行
-    localparam S_LOAD_DATA  = 4'd5;   // 加载数据
-    localparam S_SEND_DATA  = 4'd6;   // 发送数据
-    localparam S_SEND_SPACE = 4'd7;   // 发送空格
-    localparam S_SEND_CR    = 4'd8;   // 发送回车
-    localparam S_SEND_LF    = 4'd9;   // 发送换行
-    localparam S_NEXT_MAT   = 4'd10;  // 下一个矩阵
-    localparam S_DONE       = 4'd11;  // 完成
+    localparam S_SET_ID     = 4'd1;   // 设置读取 ID (新增：等待一周期)
+    localparam S_LOAD_DIM   = 4'd2;   // 加载矩阵维度
+    localparam S_CHECK_DIM  = 4'd3;   // 检查维度是否有效
+    localparam S_SEND_HEADER= 4'd4;   // 发送标题 "MX:"
+    localparam S_SEND_DIM   = 4'd5;   // 发送维度 "[RxC]\r\n"
+    localparam S_SET_ADDR   = 4'd6;   // 设置读取地址 (新增：等待一周期)
+    localparam S_LOAD_DATA  = 4'd7;   // 加载数据
+    localparam S_SEND_DATA  = 4'd8;   // 发送数据
+    localparam S_SEND_SPACE = 4'd9;   // 发送空格
+    localparam S_SEND_CR    = 4'd10;  // 发送回车
+    localparam S_SEND_LF    = 4'd11;  // 发送换行
+    localparam S_NEXT_MAT   = 4'd12;  // 下一个矩阵
+    localparam S_DONE       = 4'd13;  // 完成
 
     reg [3:0] state;
     reg [2:0] current_mat_id;         // 当前正在发送的矩阵 ID
@@ -110,6 +107,7 @@ module matrix_uart_display (
                 // 空闲状态: 等待启动信号
                 //--------------------------------------------------------------
                 S_IDLE: begin
+                    busy <= 1'b0;
                     if (start_display) begin
                         busy <= 1'b1;
                         if (display_all) begin
@@ -117,27 +115,39 @@ module matrix_uart_display (
                         end else begin
                             current_mat_id <= matrix_id;
                         end
-                        state <= S_LOAD_DIM;
+                        state <= S_SET_ID;
                     end
                 end
 
                 //--------------------------------------------------------------
-                // 加载矩阵维度
+                // 设置读取 ID：等待一个周期让存储单元响应
                 //--------------------------------------------------------------
-                S_LOAD_DIM: begin
+                S_SET_ID: begin
                     read_id <= current_mat_id;
                     read_addr <= 5'd0;
-                    // 等待一个周期让数据稳定
+                    state <= S_LOAD_DIM;
+                end
+
+                //--------------------------------------------------------------
+                // 加载矩阵维度：再等一个周期确保数据稳定
+                //--------------------------------------------------------------
+                S_LOAD_DIM: begin
+                    // 此时 dim_row/dim_col 应该已经稳定
                     target_rows <= dim_row;
                     target_cols <= dim_col;
+                    state <= S_CHECK_DIM;
+                end
+
+                //--------------------------------------------------------------
+                // 检查维度是否有效
+                //--------------------------------------------------------------
+                S_CHECK_DIM: begin
                     header_idx <= 4'd0;
-                    
-                    // 检查矩阵是否有效
-                    if (dim_row == 0 || dim_col == 0) begin
+                    if (target_rows == 0 || target_cols == 0) begin
                         // 空矩阵，跳过或结束
                         if (display_all && current_mat_id < mat_count - 1) begin
                             current_mat_id <= current_mat_id + 1;
-                            state <= S_LOAD_DIM;
+                            state <= S_SET_ID;
                         end else begin
                             state <= S_DONE;
                         end
@@ -148,24 +158,19 @@ module matrix_uart_display (
                 end
 
                 //--------------------------------------------------------------
-                // 发送标题: "MATRIX X:\r\n" 
-                // 简化为 "M0:" 或 "M1:" 等
+                // 发送标题: "MX:" (X是矩阵ID)
                 //--------------------------------------------------------------
                 S_SEND_HEADER: begin
                     if (!tx_busy && !wait_tx) begin
                         case (header_idx)
-                            4'd0: begin tx_data <= ASCII_M; tx_start <= 1'b1; end
-                            4'd1: begin tx_data <= ASCII_0 + {5'b0, current_mat_id}; tx_start <= 1'b1; end
-                            4'd2: begin tx_data <= ASCII_COLON; tx_start <= 1'b1; end
+                            4'd0: begin tx_data <= ASCII_M; tx_start <= 1'b1; wait_tx <= 1'b1; header_idx <= 4'd1; end
+                            4'd1: begin tx_data <= ASCII_0 + {5'b0, current_mat_id}; tx_start <= 1'b1; wait_tx <= 1'b1; header_idx <= 4'd2; end
+                            4'd2: begin tx_data <= ASCII_COLON; tx_start <= 1'b1; wait_tx <= 1'b1; header_idx <= 4'd3; end
                             4'd3: begin 
                                 state <= S_SEND_DIM;
                                 dim_idx <= 4'd0;
                             end
                         endcase
-                        if (header_idx < 4'd3) begin
-                            header_idx <= header_idx + 1;
-                            wait_tx <= 1'b1;
-                        end
                     end
                     if (wait_tx && !tx_busy) begin
                         wait_tx <= 1'b0;
@@ -178,23 +183,19 @@ module matrix_uart_display (
                 S_SEND_DIM: begin
                     if (!tx_busy && !wait_tx) begin
                         case (dim_idx)
-                            4'd0: begin tx_data <= ASCII_LBRK; tx_start <= 1'b1; end
-                            4'd1: begin tx_data <= ASCII_0 + {5'b0, target_rows}; tx_start <= 1'b1; end
-                            4'd2: begin tx_data <= ASCII_x; tx_start <= 1'b1; end
-                            4'd3: begin tx_data <= ASCII_0 + {5'b0, target_cols}; tx_start <= 1'b1; end
-                            4'd4: begin tx_data <= ASCII_RBRK; tx_start <= 1'b1; end
-                            4'd5: begin tx_data <= ASCII_CR; tx_start <= 1'b1; end
-                            4'd6: begin tx_data <= ASCII_LF; tx_start <= 1'b1; end
+                            4'd0: begin tx_data <= ASCII_LBRK; tx_start <= 1'b1; wait_tx <= 1'b1; dim_idx <= 4'd1; end
+                            4'd1: begin tx_data <= ASCII_0 + {5'b0, target_rows}; tx_start <= 1'b1; wait_tx <= 1'b1; dim_idx <= 4'd2; end
+                            4'd2: begin tx_data <= ASCII_x; tx_start <= 1'b1; wait_tx <= 1'b1; dim_idx <= 4'd3; end
+                            4'd3: begin tx_data <= ASCII_0 + {5'b0, target_cols}; tx_start <= 1'b1; wait_tx <= 1'b1; dim_idx <= 4'd4; end
+                            4'd4: begin tx_data <= ASCII_RBRK; tx_start <= 1'b1; wait_tx <= 1'b1; dim_idx <= 4'd5; end
+                            4'd5: begin tx_data <= ASCII_CR; tx_start <= 1'b1; wait_tx <= 1'b1; dim_idx <= 4'd6; end
+                            4'd6: begin tx_data <= ASCII_LF; tx_start <= 1'b1; wait_tx <= 1'b1; dim_idx <= 4'd7; end
                             4'd7: begin
-                                state <= S_LOAD_DATA;
+                                state <= S_SET_ADDR;
                                 current_row <= 3'd0;
                                 current_col <= 3'd0;
                             end
                         endcase
-                        if (dim_idx < 4'd7) begin
-                            dim_idx <= dim_idx + 1;
-                            wait_tx <= 1'b1;
-                        end
                     end
                     if (wait_tx && !tx_busy) begin
                         wait_tx <= 1'b0;
@@ -202,12 +203,19 @@ module matrix_uart_display (
                 end
 
                 //--------------------------------------------------------------
+                // 设置读取地址：等待一个周期
+                //--------------------------------------------------------------
+                S_SET_ADDR: begin
+                    read_id <= current_mat_id;
+                    read_addr <= current_row * 5 + current_col;
+                    state <= S_LOAD_DATA;
+                end
+
+                //--------------------------------------------------------------
                 // 加载数据: 从存储单元读取当前元素
                 //--------------------------------------------------------------
                 S_LOAD_DATA: begin
-                    read_id <= current_mat_id;
-                    read_addr <= current_row * 5 + current_col;
-                    // 等待一个周期
+                    // 此时 read_data 应该已经稳定
                     current_data <= read_data;
                     state <= S_SEND_DATA;
                     wait_tx <= 1'b0;
@@ -247,7 +255,7 @@ module matrix_uart_display (
                     if (wait_tx && !tx_busy) begin
                         wait_tx <= 1'b0;
                         current_col <= current_col + 1;
-                        state <= S_LOAD_DATA;
+                        state <= S_SET_ADDR;  // 重新设置地址
                     end
                 end
 
@@ -284,7 +292,7 @@ module matrix_uart_display (
                         end else begin
                             current_row <= current_row + 1;
                             current_col <= 3'd0;
-                            state <= S_LOAD_DATA;
+                            state <= S_SET_ADDR;  // 重新设置地址
                         end
                     end
                 end
@@ -295,7 +303,7 @@ module matrix_uart_display (
                 S_NEXT_MAT: begin
                     if (display_all && current_mat_id < mat_count - 1) begin
                         current_mat_id <= current_mat_id + 1;
-                        state <= S_LOAD_DIM;
+                        state <= S_SET_ID;
                     end else begin
                         state <= S_DONE;
                     end
