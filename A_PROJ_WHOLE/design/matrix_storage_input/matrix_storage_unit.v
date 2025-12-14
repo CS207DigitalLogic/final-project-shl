@@ -71,7 +71,7 @@ module matrix_storage_unit #(
     reg [4:0] total_elements;
     reg       input_complete;
 
-    // Generator 变量 (省略部分细节，保持原有逻辑)
+    // Generator 变量
     reg [2:0] gen_rows, gen_cols;
     reg [1:0] gen_mat_count_target;
     reg [1:0] gen_mat_idx;
@@ -88,7 +88,7 @@ module matrix_storage_unit #(
     // ASCII 转换
     wire [3:0] numeric_val = uart_rx_data[3:0];
 
-    // 用于累加多位数字 (比如 "12")
+    // 用于累加多位数字
     reg [7:0] parse_val;         
     // 标记当前 parse_val 是否包含有效数字
     reg       parse_valid;    
@@ -354,6 +354,9 @@ module matrix_storage_unit #(
                 // 3. Confirm 信号处理
                 if (confirm_signal) begin
                     if (rx_state == RX_DATA) begin
+                        if (parse_valid && elem_count < total_elements) begin
+                             mem_data[curr_mat_id][curr_row * 5 + curr_col] <= parse_val[3:0];
+                        end
                         mem_rows[curr_mat_id] <= target_rows;
                         mem_cols[curr_mat_id] <= target_cols;
                         if (!is_overwrite_mode && mat_count < HARD_MAX_MATRICES) 

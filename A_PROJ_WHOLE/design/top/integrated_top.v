@@ -69,7 +69,7 @@ reg error_flag;
 //==========================================================================
 localparam CLK_FREQ   = 100_000_000;  // uart
 localparam BAUD_RATE  = 115200;       // uart
-localparam MAX_MATRICES = 4;
+localparam MAX_MATRICES = 7;
 localparam MAX_DIM    = 5;
 
 //======================================================================
@@ -426,15 +426,20 @@ matrix_storage_unit #(
 //==========================================================================
 // 8. 矩阵 UART 展示模块实例化 (Matrix UART Display)
 //==========================================================================
-
-// 触发脉冲逻辑: 在 S_DISPLAYER 状态下按 "confirm" 键触发
+reg [3:0] state_last;
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) state_last <= 4'd0; 
+    else        state_last <= state;
+end
+// 2. 生成 Display 模块的启动脉冲信号
 reg display_start_pulse;
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         display_start_pulse <= 1'b0;
     end else begin
         display_start_pulse <= 1'b0; // 默认拉低，形成脉冲
-        if (state == S_DISPLAYER && confirm_flag && !display_busy) begin
+
+        if (state == S_DISPLAYER && state_last != S_DISPLAYER) begin
             display_start_pulse <= 1'b1;
         end
     end
@@ -450,7 +455,7 @@ wire [2:0] display_dim_col_in = dim_col_A;
 wire [3:0] display_read_data_in = read_data_A;
 
 matrix_uart_display #(
-    .PTR_WIDTH(3)  // 确保这里的参数与 storage 一致
+    .PTR_WIDTH(4)  // 确保这里的参数与 storage 一致
 ) u_matrix_display (
     .clk            (clk),
     .rst_n          (rst_n),
