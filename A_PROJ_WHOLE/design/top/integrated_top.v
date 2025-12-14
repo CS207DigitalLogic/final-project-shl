@@ -303,20 +303,20 @@ end
 // S_SE_n: 矩阵数量限制设置
 //==========================================================================
 // 真正供给系统的数量限制 (寄存器)
-reg [2:0] active_mat_limit; 
+reg [2:0] setting_max_per_dim; 
 
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-        // 复位时的默认值4
-        active_mat_limit <= 3'd4; 
+        // 复位时的默认值2
+        setting_max_per_dim <= 3'd2; 
     end else begin
         // 只有在 "S_SE_n" 状态下，且按下 Confirm 时，才更新值
         if (state == S_SE_n && confirm_flag) begin
             // 安全检查：防止用户设置为 0 
             if (matrix_limit_input_preview == 3'd0) begin
-                active_mat_limit <= 3'd1; // 最小设为 1
+                setting_max_per_dim <= 3'd1; // 最小设为 1
             end else begin
-                active_mat_limit <= matrix_limit_input_preview;
+                setting_max_per_dim <= matrix_limit_input_preview;
             end           
         end
     end
@@ -388,13 +388,13 @@ assign mux_read_addr_A = display_busy ? display_read_addr : calc_read_addr_A;
 wire [4:0] calc_read_addr_B = 5'd0; // [预留]
 
 matrix_storage_unit #(
-    .HARD_MAX_MATRICES(7), 
-    .PTR_WIDTH(3)
+    .HARD_MAX_MATRICES(15), 
+    .PTR_WIDTH(4)
 ) u_matrix_store (
     .clk            (clk),
     .rst_n          (rst_n),
 
-    .user_set_limit (active_mat_limit),
+    .max_per_dim    (setting_max_per_dim), // 同规格矩阵数量上限
 
     // 1. 控制信号
     .current_state  (state),         
@@ -591,7 +591,25 @@ end
 //==========================================================================
 // 13. LED logic
 //==========================================================================
-assign led_error = error_flag | storage_input_error;
+// 按下 Confirm 键，才清除错误灯
+reg led_error_latch;
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        led_error_latch <= 1'b0;
+    end
+    else begin
+        // 1. 如果有任何错误发生，锁存住（变亮）
+        if (storage_input_error || error_flag) begin
+            led_error_latch <= 1'b1;
+        end
+        // 2. 只有按下 Confirm 键，才清除错误灯（变灭）
+        else if (confirm_flag) begin
+            led_error_latch <= 1'b0;
+        end
+    end
+end
+
+assign led_error = led_error_latch;
 assign led_idle  = (state == S_MENU);
 assign led_busy  = countdown_active || (state >= S_OP_T && state <= S_OP_J);
 assign led_done  = calc_done;
@@ -726,7 +744,7 @@ always @(*) begin
         // 如果在S_SE_n，显示开关的实时预览值
         limit_num_to_show = {1'b0, matrix_limit_input_preview}; 
     end else begin
-        limit_num_to_show = active_mat_limit; 
+        limit_num_to_show = setting_max_per_dim; 
     end
     case (limit_num_to_show)
         3'd1: limit_seg = SEG_1;
