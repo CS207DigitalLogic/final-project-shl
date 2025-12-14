@@ -61,7 +61,7 @@ wire [2:0] dim_row_B, dim_col_B;
 wire [3:0] read_data_B;
 wire [4:0] read_addr_B; // 地址由运算模块控制(暂未实现)
 
-// 内部寄存器，用于记录状态机触发的错误
+// 内部寄存器，用于记录状态机触发的错误。input和operate共用这个
 reg error_flag;
 
 //==========================================================================
@@ -383,7 +383,7 @@ assign read_id_A_mux = display_busy ? display_read_id : operand1_id;
 assign read_addr_B = 5'd0;
 
 matrix_storage_unit #(
-    .HARD_MAX_MATRICES(8), 
+    .HARD_MAX_MATRICES(7), 
     .PTR_WIDTH(3)
 ) u_matrix_store (
     .clk            (clk),

@@ -1,8 +1,17 @@
 //storage, input parsing, and random generation of matrices for a calculator system.
 `timescale 1ns / 1ps
-module matrix_storage_unit (
+module matrix_storage_unit #(
+    // =========================================================
+    // 物理参数 (Physical Hard Limit) - 综合后占用固定资源
+    // =========================================================
+    parameter HARD_MAX_MATRICES = 7,        // 预留 7 个位置，即使默认只用 4 个
+    parameter PTR_WIDTH         = 3         // 3位宽足够表示 0-7
+)(
     input wire clk,
     input wire rst_n,
+
+    // 这个信号来自设置菜单寄存器，决定当前能用几个矩阵
+    input wire [PTR_WIDTH:0] user_set_limit, // 比如输入 4, 6, 7
 
     // 1. 控制信号
     input wire [3:0] current_state, // 外部传入的状态 (state)
@@ -14,22 +23,22 @@ module matrix_storage_unit (
 
     // 3. 数据输出 (提供给 Calculator 和 Display)
     // 读端口 A
-    input wire [2:0]  read_id_A,      
+    input wire [PTR_WIDTH-1:0]  read_id_A,      
     output wire [2:0] dim_row_A,      
     output wire [2:0] dim_col_A,      
     input wire [4:0]  read_addr_A,    
     output wire [3:0] read_data_A,    
 
     // 读端口 B
-    input wire [2:0]  read_id_B,
+    input wire [PTR_WIDTH-1:0]  read_id_B,
     output wire [2:0] dim_row_B,
     output wire [2:0] dim_col_B,
     input wire [4:0]  read_addr_B,
     output wire [3:0] read_data_B,
 
     // 4. 状态反馈
-    output reg        input_error,    // 改为 reg 以便在 always 中赋值
-    output wire [2:0] mat_count_out   // 当前存了几个矩阵
+    output reg  input_error,    // 改为 reg 以便在 always 中赋值
+    output wire [PTR_WIDTH:0] mat_count_out   // 当前存了几个矩阵
 );
 
     //==========================================================================
@@ -46,7 +55,7 @@ module matrix_storage_unit (
     reg [3:0]  mem_data [0:MAX_MATRICES-1][0:24];
     reg [2:0]  mem_rows [0:MAX_MATRICES-1];
     reg [2:0]  mem_cols [0:MAX_MATRICES-1];
-    reg [2:0]  mat_count;
+    reg [PTR_WIDTH:0]  mat_count;
 
     // 状态机定义
     localparam RX_IDLE     = 3'd0;
@@ -67,7 +76,7 @@ module matrix_storage_unit (
     reg [2:0] gen_state;
 
     // 通用变量
-    reg [1:0] curr_mat_id;
+    reg [PTR_WIDTH-1:0] curr_mat_id;
     reg [2:0] curr_row, curr_col;
     reg [2:0] target_rows, target_cols;
     reg [4:0] elem_count;
@@ -99,35 +108,38 @@ module matrix_storage_unit (
     //==========================================================================
     // 2. 辅助函数
     //==========================================================================
-    function [1:0] find_slot;
+    function [PTR_WIDTH-1:0] find_slot;
         input [2:0] rows, cols;
-        reg [1:0] slot;
-        reg found;
         integer k;
+        reg found_empty, found_match;
+        reg [PTR_WIDTH-1:0] temp_empty, temp_match;
         begin
-            slot = 0;
-            found = 0;
-            // 优先找空槽
-            for (k = 0; k < MAX_MATRICES && !found; k = k + 1) begin
-                if (mem_rows[k] == 0 && mem_cols[k] == 0) begin
-                    slot = k[1:0];
-                    found = 1;
-                end
-            end
-            // 找同规格覆盖
-            if (!found) begin
-                for (k = 0; k < MAX_MATRICES && !found; k = k + 1) begin
-                    if (mem_rows[k] == rows && mem_cols[k] == cols) begin
-                        slot = k[1:0];
-                        found = 1;
+            found_empty = 0; found_match = 0;
+            temp_empty = 0; temp_match = 0;
+
+            // 循环必须是静态的 (0 到 HARD_MAX)，但在内部用 if 判断逻辑边界
+            for (k = 0; k < HARD_MAX_MATRICES; k = k + 1) begin
+                // *** 关键修改 ***
+                // 只有当索引 k 小于用户设置的上限时，才允许被选中
+                if (k < user_set_limit) begin
+                    
+                    // 找空槽
+                    if (!found_empty && mem_rows[k] == 0 && mem_cols[k] == 0) begin
+                        temp_empty = k[PTR_WIDTH-1:0];
+                        found_empty = 1;
+                    end
+                    
+                    // 找匹配槽
+                    if (!found_match && mem_rows[k] == rows && mem_cols[k] == cols) begin
+                        temp_match = k[PTR_WIDTH-1:0];
+                        found_match = 1;
                     end
                 end
             end
-            // 循环覆盖
-            if (!found) begin
-                slot = curr_mat_id; // 简单回退策略
-            end
-            find_slot = slot;
+
+            if (found_empty)      find_slot = temp_empty;
+            else if (found_match) find_slot = temp_match;
+            else                  find_slot = curr_mat_id; 
         end
     endfunction
 
@@ -272,7 +284,7 @@ module matrix_storage_unit (
                     RX_CONFIRM: begin
                         mem_rows[curr_mat_id] <= target_rows;
                         mem_cols[curr_mat_id] <= target_cols;
-                        if (mat_count < MAX_MATRICES) mat_count <= mat_count + 1;
+                        if (mat_count < user_set_limit) mat_count <= mat_count + 1;
                         input_complete <= 1'b1;
                         rx_state <= RX_IDLE;
                         

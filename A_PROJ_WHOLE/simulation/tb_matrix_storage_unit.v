@@ -15,7 +15,7 @@ module tb_matrix_storage_unit;
     reg clk;
     reg rst_n;
 
-    // 新增：用户设置的矩阵数量限制
+    // 用户设置的矩阵数量限制
     reg [PTR_WIDTH:0] user_set_limit;
 
     // 控制信号
