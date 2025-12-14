@@ -9,20 +9,18 @@
 //   7 8 9
 //==============================================================================
 
-module matrix_uart_display #(
-    parameter PTR_WIDTH = 3  // 新增参数，默认3
-)(
+module matrix_uart_display (
     input wire clk,
     input wire rst_n,
     
     // 控制信号
     input wire start_display,       // 开始发送 (单周期脉冲)
-    input wire [PTR_WIDTH - 1:0] matrix_id,     // 要显示的矩阵 ID (0~3)
+    input wire [2:0] matrix_id,     // 要显示的矩阵 ID (0~3)
     input wire display_all,         // 1: 显示所有矩阵, 0: 只显示选中的矩阵
-    input wire [PTR_WIDTH - 1:0] mat_count,     // 当前存储的矩阵数量
+    input wire [2:0] mat_count,     // 当前存储的矩阵数量
     
     // 矩阵数据接口 (连接到 matrix_storage_unit)
-    output reg [PTR_WIDTH - 1:0] read_id,       // 读取的矩阵 ID
+    output reg [2:0] read_id,       // 读取的矩阵 ID
     output reg [4:0] read_addr,     // 读取地址 (0~24)
     input wire [3:0] read_data,     // 读取的数据
     input wire [2:0] dim_row,       // 矩阵行数
@@ -70,7 +68,7 @@ module matrix_uart_display #(
     localparam S_DONE       = 4'd13;  // 完成
 
     reg [3:0] state;
-    reg [PTR_WIDTH - 1:0] current_mat_id;         // 当前正在发送的矩阵 ID
+    reg [2:0] current_mat_id;         // 当前正在发送的矩阵 ID
     reg [2:0] current_row, current_col; // 当前发送位置
     reg [2:0] target_rows, target_cols; // 目标矩阵的行列数
     reg [3:0] header_idx;             // 标题字符索引
