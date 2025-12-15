@@ -69,7 +69,7 @@ reg error_flag;
 //==========================================================================
 localparam CLK_FREQ   = 100_000_000;  // uart
 localparam BAUD_RATE  = 115200;       // uart
-localparam MAX_MATRICES = 7;
+localparam MAX_MATRICES = 4;
 localparam MAX_DIM    = 5;
 
 //======================================================================
@@ -127,7 +127,7 @@ localparam S_OP_J      = 4'd10;  // 卷积
 // settings sub-FSM
 localparam S_SE_n      = 4'd11;  // 每规格矩阵数量上限
 localparam S_SE_c      = 4'd12;  // 倒计时秒数（5~15），默认10
-localparam S_SE_r      = 4'd13;  // 元素范围（默认 0–9）
+localparam S_SE_r      = 4'd13;  // 元素范围（默认 0-9）
 
 reg [3:0] state, state_next;
 
@@ -303,20 +303,20 @@ end
 // S_SE_n: 矩阵数量限制设置
 //==========================================================================
 // 真正供给系统的数量限制 (寄存器)
-reg [2:0] setting_max_per_dim; 
+reg [2:0] active_mat_limit; 
 
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-        // 复位时的默认值2
-        setting_max_per_dim <= 3'd2; 
+        // 复位时的默认值4
+        active_mat_limit <= 3'd4; 
     end else begin
         // 只有在 "S_SE_n" 状态下，且按下 Confirm 时，才更新值
         if (state == S_SE_n && confirm_flag) begin
             // 安全检查：防止用户设置为 0 (这会导致错误)
             if (matrix_limit_input_preview == 3'd0) begin
-                setting_max_per_dim <= 3'd1; // 最小设为 1
+                active_mat_limit <= 3'd1; // 最小设为 1
             end else begin
-                setting_max_per_dim <= matrix_limit_input_preview;
+                active_mat_limit <= matrix_limit_input_preview;
             end           
         end
     end
@@ -409,13 +409,13 @@ assign read_id_A_mux = selector_busy ? selector_read_id :
 assign read_addr_B = 5'd0;
 
 matrix_storage_unit #(
-    .HARD_MAX_MATRICES(15), 
-    .PTR_WIDTH(4)
+    .HARD_MAX_MATRICES(7), 
+    .PTR_WIDTH(3)
 ) u_matrix_store (
     .clk            (clk),
     .rst_n          (rst_n),
 
-    .max_per_dim    (setting_max_per_dim), // 同规格矩阵数量上限
+    .user_set_limit (active_mat_limit),
 
     // 1. 控制信号
     .current_state  (state),         
@@ -469,15 +469,7 @@ end
 // 展示所有矩阵 or 单个矩阵: sw[0] = 1 表示展示所有
 wire display_all_matrices = sw[0];
 
-// 为了让 Display 模块能读到数据，我们需要把 Storage Port A 的输出喂给它
-// 注意：因为上面做了 MUX，当 display_busy=1 时，read_data_A 输出的就是 Display 请求的数据
-wire [2:0] display_dim_row_in = dim_row_A;
-wire [2:0] display_dim_col_in = dim_col_A;
-wire [3:0] display_read_data_in = read_data_A;
-
-matrix_uart_display #(
-    .PTR_WIDTH(4)  // 确保这里的参数与 storage 一致
-) u_matrix_display (
+matrix_uart_display u_matrix_display (
     .clk            (clk),
     .rst_n          (rst_n),
     
@@ -526,8 +518,8 @@ always @(posedge clk or negedge rst_n) begin
 end
 
 matrix_summary_display #(
-    .MAX_MATRICES(15),
-    .PTR_WIDTH(4)
+    .MAX_MATRICES(7),
+    .PTR_WIDTH(3)
 ) u_matrix_summary (
     .clk            (clk),
     .rst_n          (rst_n),
@@ -580,8 +572,8 @@ always @(posedge clk or negedge rst_n) begin
 end
 
 operand_selector #(
-    .MAX_MATRICES(15),
-    .PTR_WIDTH(4)
+    .MAX_MATRICES(7),
+    .PTR_WIDTH(3)
 ) u_operand_selector (
     .clk            (clk),
     .rst_n          (rst_n),
@@ -726,25 +718,7 @@ end
 //==========================================================================
 // LED logic
 //==========================================================================
-// 按下 Confirm 键，才清除错误灯
-reg led_error_latch;
-always @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-        led_error_latch <= 1'b0;
-    end
-    else begin
-        // 1. 如果有任何错误发生，锁存住（变亮）
-        if (storage_input_error || error_flag) begin
-            led_error_latch <= 1'b1;
-        end
-        // 2. 只有按下 Confirm 键，才清除错误灯（变灭）
-        else if (confirm_flag) begin
-            led_error_latch <= 1'b0;
-        end
-    end
-end
-
-assign led_error = led_error_latch;
+assign led_error = error_flag | storage_input_error | selector_error;
 assign led_idle  = (state == S_MENU);
 assign led_busy  = countdown_active || selector_busy || (state >= S_OP_T && state <= S_OP_J);
 assign led_done  = calc_done || selector_done;
@@ -879,7 +853,7 @@ always @(*) begin
         // 如果在S_SE_n，显示开关的实时预览值
         limit_num_to_show = {1'b0, matrix_limit_input_preview}; 
     end else begin
-        limit_num_to_show = setting_max_per_dim; 
+        limit_num_to_show = active_mat_limit; 
     end
     case (limit_num_to_show)
         3'd1: limit_seg = SEG_1;
