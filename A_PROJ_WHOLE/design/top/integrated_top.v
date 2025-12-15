@@ -397,16 +397,18 @@ uart_tx #(
 //==========================================================================
 // 地址选择: 各模块工作时使用其地址，否则使用运算地址
 wire [4:0] read_addr_A_calc = 5'd0; // 计算模块的地址 (待实现)
-wire [4:0] read_addr_B_calc = 5'd0; // 计算模块的地址 (待实现)
+wire [4:0] read_addr_A_calc = calc_loading ? calc_read_addr_A : 5'd0;
+wire [4:0] read_addr_B_calc = calc_loading ? calc_read_addr_B : 5'd0;
 
 // 读取 ID 选择: 优先级 selector > summary > display > 默认
 wire [2:0] read_id_A_mux;
-assign read_addr_A = selector_busy ? selector_read_addr :
-                     display_busy  ? display_read_addr  : read_addr_A_calc;
+assign read_addr_A = calc_loading  ? calc_read_addr_A :
+                     selector_busy ? selector_read_addr :
+                     display_busy  ? display_read_addr  : 5'd0;
 assign read_id_A_mux = selector_busy ? selector_read_id :
                        summary_busy  ? summary_read_id  :
                        display_busy  ? display_read_id  : operand1_id;
-assign read_addr_B = 5'd0;
+assign read_addr_B = calc_loading ? calc_read_addr_B : 5'd0;
 
 matrix_storage_unit #(
     .HARD_MAX_MATRICES(15), 
@@ -701,26 +703,118 @@ always @(posedge clk or negedge rst_n) begin
 end
 
 //==========================================================================
-// 矩阵计算核心 (来自 part_shl)
+// 矩阵计算核心 (Matrix Calculate Core)
+// 功能: 执行转置、加法、标量乘、矩阵乘运算
+// 使用 matrix_calculator 模块，它直接从存储单元读取数据
 //==========================================================================
-// 这里简化处理，实际需要实例化 matrix_calculate 模块
-reg        calc_start;
-reg        calc_done;
-reg [15:0] calc_result [0:24];
-reg [2:0]  result_rows, result_cols;
 
-// 初始化 calc_start 和 calc_done (避免 LED 不稳定)
-// TODO: 当实现真正的计算模块时，这些信号应由计算模块驱动
+// 计算模块控制信号
+reg         calc_start;
+wire        calc_busy;
+wire        calc_done;
+wire [2:0]  calc_result_rows, calc_result_cols;
+
+// 计算模块读取地址 (直接连接到存储单元)
+wire [4:0]  calc_read_addr_A;
+wire [4:0]  calc_read_addr_B;
+
+// 结果读取接口
+reg  [4:0]  result_read_addr;
+wire [15:0] result_read_data;
+
+// 操作码转换 (从状态机状态转换为 matrix_calculator 的 opcode)
+// S_OP_T=6, S_OP_A=7, S_OP_B=8, S_OP_C=9
+// opcode: 000=转置, 001=加法, 010=标量乘, 011=矩阵乘
+reg [2:0] calc_opcode;
+always @(*) begin
+    case (state)
+        S_OP_T:  calc_opcode = 3'b000;  // 转置
+        S_OP_A:  calc_opcode = 3'b001;  // 加法
+        S_OP_B:  calc_opcode = 3'b010;  // 标量乘
+        S_OP_C:  calc_opcode = 3'b011;  // 矩阵乘
+        default: calc_opcode = 3'b000;
+    endcase
+end
+
+// 标量值 (来自 sw_right[3:0])
+wire [3:0] scalar_value = sw_right[3:0];
+
+// 计算启动控制
+// 在运算子状态，当用户按 confirm 且运算数选择完成时启动计算
+wire calc_trigger = in_op_substate && confirm_flag && selector_done;
+wire calc_valid;
+
+// 验证运算是否有效
+assign calc_valid = (state == S_OP_T || state == S_OP_B) ? 1'b1 :  // 转置/标量乘总是有效
+                    (state == S_OP_A) ? add_valid :                 // 加法检查维度匹配
+                    (state == S_OP_C) ? mul_valid :                 // 乘法检查维度兼容
+                    1'b0;
+
+// 计算启动脉冲生成
+reg calc_trigger_d;
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-        calc_start <= 1'b0;
-        calc_done  <= 1'b0;
+        calc_start    <= 1'b0;
+        calc_trigger_d <= 1'b0;
     end else begin
-        // 暂时保持为 0，等待计算模块实现
-        calc_start <= 1'b0;
-        calc_done  <= 1'b0;
+        calc_trigger_d <= calc_trigger;
+        // 上升沿检测 + 验证通过时启动
+        calc_start <= calc_trigger && !calc_trigger_d && calc_valid && !calc_busy;
     end
 end
+
+// 实例化 matrix_calculator 模块
+// 该模块直接从存储单元读取数据，无需预加载缓冲区
+matrix_calculator #(
+    .MAX_DIM      (5),
+    .DATA_WIDTH   (4),
+    .RESULT_WIDTH (16)
+) u_matrix_calc (
+    .clk            (clk),
+    .rst_n          (rst_n),
+    
+    // 控制接口
+    .start          (calc_start),
+    .opcode         (calc_opcode),
+    .scalar         (scalar_value),
+    
+    // 矩阵 A 接口 (连接到存储单元端口 A)
+    .dim_row_A      (dim_row_A),
+    .dim_col_A      (dim_col_A),
+    .read_addr_A    (calc_read_addr_A),
+    .read_data_A    (read_data_A),
+    
+    // 矩阵 B 接口 (连接到存储单元端口 B)
+    .dim_row_B      (dim_row_B),
+    .dim_col_B      (dim_col_B),
+    .read_addr_B    (calc_read_addr_B),
+    .read_data_B    (read_data_B),
+    
+    // 状态输出
+    .busy           (calc_busy),
+    .done           (calc_done),
+    .result_rows    (calc_result_rows),
+    .result_cols    (calc_result_cols),
+    
+    // 结果读取接口
+    .result_read_addr (result_read_addr),
+    .result_read_data (result_read_data)
+);
+
+// 计算完成标志 (用于 LED 和后续处理)
+reg calculation_done;
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        calculation_done <= 1'b0;
+    end else if (calc_done) begin
+        calculation_done <= 1'b1;
+    end else if (state == S_MENU || state == S_OPERATOR) begin
+        calculation_done <= 1'b0;
+    end
+end
+
+// 读取地址选择: 计算模块忙时使用计算模块地址，否则使用其他模块地址
+wire calc_loading = calc_busy;
 
 
 //==========================================================================
