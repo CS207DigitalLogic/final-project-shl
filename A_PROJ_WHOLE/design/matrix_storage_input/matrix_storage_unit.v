@@ -1,27 +1,22 @@
-//storage, input parsing, and random generation of matrices for a calculator system.
 `timescale 1ns / 1ps
 module matrix_storage_unit #(
-    // =========================================================
-    // 物理参数 (Physical Hard Limit) - 综合后占用固定资源
-    // =========================================================
-    parameter HARD_MAX_MATRICES = 7,        // 预留 7 个位置，即使默认只用 4 个
-    parameter PTR_WIDTH         = 3         // 3位宽足够表示 0-15
+    parameter HARD_MAX_MATRICES = 15,       
+    parameter PTR_WIDTH         = 4         
 )(
     input wire clk,
     input wire rst_n,
 
-    // 来自设置菜单寄存器，决定当前能用几个矩阵
-    input wire [PTR_WIDTH:0] user_set_limit, // 比如输入 4, 6, 7
+    // 限制每种规格最大存储数量 (0-7)
+    input wire [2:0] max_per_dim, 
 
-    // 1. 控制信号
-    input wire [3:0] current_state, // 外部传入的状态 (state)
-    input wire confirm_signal,      // 外部传入的确认信号 (confirm_flag)
+    // 控制信号
+    input wire [3:0] current_state, 
+    input wire confirm_signal,      // 确认/清除错误信号
 
-    // 2. 数据输入源 (UART)
+    // UART 数据
     input wire [7:0] uart_rx_data,
     input wire       uart_rx_done,
 
-    // 3. 数据输出 (提供给 Calculator 和 Display)
     // 读端口 A
     input wire [PTR_WIDTH-1:0]  read_id_A,      
     output wire [2:0] dim_row_A,      
@@ -36,16 +31,13 @@ module matrix_storage_unit #(
     input wire [4:0]  read_addr_B,
     output wire [3:0] read_data_B,
 
-    // 4. 状态反馈
-    output reg  input_error,    // 改为 reg 以便在 always 中赋值
-    output wire [PTR_WIDTH:0] mat_count_out   // 当前存了几个矩阵
+    // 状态反馈
+    output reg  input_error,   
+    output wire [PTR_WIDTH:0] mat_count_out   
 );
-
     //==========================================================================
-    // 0. 参数与内部变量定义
+    // 0. 参数与定义
     //==========================================================================
-
-    // 状态机编码 (需与 Top 保持一致)
     localparam S_INPUTER   = 4'd1;
     localparam S_GENERATOR = 4'd2;
 
@@ -55,16 +47,14 @@ module matrix_storage_unit #(
     reg [2:0]  mem_cols [0:HARD_MAX_MATRICES-1];
     reg [PTR_WIDTH:0]  mat_count;
 
-    // 状态机定义
-    localparam RX_IDLE     = 3'd0;
-    localparam RX_ROW      = 3'd1;
-    localparam RX_DATA     = 3'd2;
-    localparam RX_OVERFLOW = 3'd3;
-    localparam RX_CONFIRM  = 3'd4;
-    localparam RX_CLEAR    = 3'd5; // 清空状态,收到行/列指令 花 25 个周期把这块地全填0, 再写数据
+    // 状态机
+    localparam RX_IDLE     = 3'd0; // 等待行
+    localparam RX_ROW      = 3'd1; // 等待列
+    localparam RX_DATA     = 3'd2; // 接收数据
+    localparam RX_ERROR    = 3'd3; // 错误状态
+    localparam RX_CLEAR    = 3'd5; // 清零内存 (实现补0功能)
     
     localparam GEN_IDLE    = 3'd0;
-    localparam GEN_ROW     = 3'd1;
     localparam GEN_COL     = 3'd2;
     localparam GEN_COUNT   = 3'd3;
     localparam GEN_WORKING = 3'd4;
@@ -73,77 +63,117 @@ module matrix_storage_unit #(
     reg [2:0] rx_state;
     reg [2:0] gen_state;
 
-    // 通用变量
+    // 内部变量
     reg [PTR_WIDTH-1:0] curr_mat_id;
     reg [2:0] curr_row, curr_col;
     reg [2:0] target_rows, target_cols;
     reg [4:0] elem_count;
     reg [4:0] total_elements;
     reg       input_complete;
+    reg tmp_error_flag;      // 临时接收错误标志
+    reg tmp_overwrite_flag;  // 临时接收覆盖标志
 
     // Generator 变量
     reg [2:0] gen_rows, gen_cols;
     reg [1:0] gen_mat_count_target;
     reg [1:0] gen_mat_idx;
     reg [4:0] gen_elem_idx;
-    reg [1:0] gen_slot;
+    reg [PTR_WIDTH-1:0] gen_slot;
 
-    // 定义辅助信号 numeric_val (从 ASCII 提取数值)
-    // ASCII '0'(0x30) -> 0, '9'(0x39) -> 9. 低4位正好对应数值。
+    // 覆盖指针
+    reg [2:0] overwrite_ptr [1:5][1:5];
+    // 查找辅助变量
+    reg [PTR_WIDTH-1:0] match_indices [0:HARD_MAX_MATRICES-1];
+    reg is_overwrite_mode;
+
+    // ASCII 转换
     wire [3:0] numeric_val = uart_rx_data[3:0];
+    // 用于累加多位数字
+    reg [7:0] parse_val;
+    // 标记当前 parse_val 是否包含有效数字
+    reg       parse_valid;
+
+    // 辅助信号
+    wire is_digit = (uart_rx_data >= 8'h30 && uart_rx_data <= 8'h39);
+    wire is_separator = (uart_rx_data == 8'h20 || uart_rx_data == 8'h0D || uart_rx_data == 8'h0A);
+
+    // 即时预判值，算出把当前接收到的数字加进去，结果多少
+    wire [7:0] lookahead_val = parse_val * 10 + (uart_rx_data - 8'h30);
 
     //==========================================================================
     // 1. 读取逻辑
     //==========================================================================
     assign mat_count_out = mat_count;
-
-    // Port A 读取
     assign dim_row_A   = mem_rows[read_id_A];
     assign dim_col_A   = mem_cols[read_id_A];
     assign read_data_A = mem_data[read_id_A][read_addr_A];
-
-    // Port B 读取
     assign dim_row_B   = mem_rows[read_id_B];
     assign dim_col_B   = mem_cols[read_id_B];
     assign read_data_B = mem_data[read_id_B][read_addr_B];
 
     //==========================================================================
-    // 2. 辅助函数
+    // 2. 辅助 Task: 查找与分配逻辑 
     //==========================================================================
-    function [PTR_WIDTH-1:0] find_slot;
-        input [2:0] rows, cols;
-        integer k;
-        reg found_empty, found_match;
-        reg [PTR_WIDTH-1:0] temp_empty, temp_match;
-        begin
-            found_empty = 0; found_match = 0;
-            temp_empty = 0; temp_match = 0;
+    integer k;
+    integer match_cnt_task;
+    reg [PTR_WIDTH-1:0] first_empty_task;
+    reg has_empty_task;
+    
+    task find_and_allocate;
+        input [2:0] r_req;
+        input [2:0] c_req;
+        output [PTR_WIDTH-1:0] allocated_id;
+        output error_flag;
+        output overwrite_flag; 
+        
+        integer i, ptr_idx;
+    begin
+        match_cnt_task = 0;
+        has_empty_task = 0;
+        first_empty_task = 0;
+        error_flag = 0;
+        overwrite_flag = 0;
 
-            // 循环必须是静态的 (0 到 HARD_MAX)，但在内部用 if 判断逻辑边界
-            for (k = 0; k < HARD_MAX_MATRICES; k = k + 1) begin
-                // *** 关键修改 ***
-                // 只有当索引 k 小于用户设置的上限时，才允许被选中
-                if (k < user_set_limit) begin
-                    
-                    // 找空槽
-                    if (!found_empty && mem_rows[k] == 0 && mem_cols[k] == 0) begin
-                        temp_empty = k[PTR_WIDTH-1:0];
-                        found_empty = 1;
-                    end
-                    
-                    // 找匹配槽
-                    if (!found_match && mem_rows[k] == rows && mem_cols[k] == cols) begin
-                        temp_match = k[PTR_WIDTH-1:0];
-                        found_match = 1;
-                    end
-                end
+        // 1. 扫描物理内存
+        for (i = 0; i < HARD_MAX_MATRICES; i = i + 1) begin
+            // 找空位
+            if (!has_empty_task && mem_rows[i] == 0) begin
+                first_empty_task = i[PTR_WIDTH-1:0];
+                has_empty_task = 1;
             end
-
-            if (found_empty)      find_slot = temp_empty;
-            else if (found_match) find_slot = temp_match;
-            else                  find_slot = curr_mat_id; 
+            // 找规格匹配
+            if (mem_rows[i] == r_req && mem_cols[i] == c_req) begin
+                match_indices[match_cnt_task] = i[PTR_WIDTH-1:0];
+                match_cnt_task = match_cnt_task + 1;
+            end
         end
-    endfunction
+
+        // 2. 决策
+        // 情况 A: 该规格数量已达 max_per_dim -> 覆盖旧的
+        if (match_cnt_task >= max_per_dim) begin
+            ptr_idx = overwrite_ptr[r_req][c_req];
+            // 容错：如果 limit 突然被调小了，ptr 可能会越界
+            if (ptr_idx >= match_cnt_task) ptr_idx = 0;
+            allocated_id = match_indices[ptr_idx]; 
+            overwrite_flag = 1;
+            // 更新指针 (Round Robin)
+            if (ptr_idx + 1 >= match_cnt_task)
+                overwrite_ptr[r_req][c_req] <= 0;
+            else
+                overwrite_ptr[r_req][c_req] <= ptr_idx + 1;
+        end
+        // 情况 B: 未达上限 & 有物理空位 -> 新增
+        else if (has_empty_task) begin
+            allocated_id = first_empty_task;
+            overwrite_flag = 0;
+        end
+        // 情况 C: 未达上限 但 物理已满 -> 无法分配，报错
+        else begin
+            allocated_id = 0;
+            error_flag = 1;
+        end
+    end
+    endtask
 
     //==========================================================================
     // 3. LFSR 随机数生成
@@ -157,172 +187,259 @@ module matrix_storage_unit #(
     end
 
     //==========================================================================
-    // 4. 核心控制逻辑 (Inputer + Generator 合并)
+    // 4. 核心控制逻辑
     //==========================================================================
-    // 将所有对 mem_data 的写操作合并到一个 always 块中，防止多重驱动错误
-    integer idx;
-    
+    integer idx_clr, r_init, c_init;
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            // 全局复位
             rx_state <= RX_IDLE;
             gen_state <= GEN_IDLE;
-            curr_mat_id <= 2'd0;
-            curr_row <= 3'd0;
-            curr_col <= 3'd0;
-            target_rows <= 3'd0;
-            target_cols <= 3'd0;
-            elem_count <= 5'd0;
-            total_elements <= 5'd0;
-            input_error <= 1'b0;
-            input_complete <= 1'b0;
-            mat_count <= 3'd0;
-            
-            // Generator 复位
-            gen_rows <= 3'd0;
-            gen_cols <= 3'd0;
-            gen_mat_count_target <= 2'd0;
-            gen_mat_idx <= 2'd0;
-            gen_elem_idx <= 5'd0;
-            gen_slot <= 2'd0;
+            curr_mat_id <= 0;
+            curr_row <= 0; curr_col <= 0;
+            target_rows <= 0; target_cols <= 0;
+            elem_count <= 0; total_elements <= 0;
+            input_error <= 0; input_complete <= 0;
+            mat_count <= 0;
+            parse_val <= 0;
+            parse_valid <= 0;
+            tmp_error_flag <= 0;
+            tmp_overwrite_flag <= 0;
 
-            // 内存初始化 (可选)
-            for (idx = 0; idx < HARD_MAX_MATRICES; idx = idx + 1) begin
-                mem_rows[idx] <= 0;
-                mem_cols[idx] <= 0;
+            // 清理存储堆
+            for (idx_clr = 0; idx_clr < HARD_MAX_MATRICES; idx_clr = idx_clr + 1) begin
+                mem_rows[idx_clr] <= 0;
+                mem_cols[idx_clr] <= 0;
             end
-
+            // 清理覆盖指针
+            for (r_init=1; r_init<=5; r_init=r_init+1) 
+                for (c_init=1; c_init<=5; c_init=c_init+1) 
+                    overwrite_ptr[r_init][c_init] <= 0;
         end else begin
-            // 默认信号
             input_complete <= 1'b0;
 
             // -----------------------------------------------------------------
-            // A. INPUTER 模式逻辑 (支持 ASCII 输入和空格分隔)
+            // A. INPUTER 模式
             // -----------------------------------------------------------------
             if (current_state == S_INPUTER) begin
-                // 重置 Generator 状态
                 gen_state <= GEN_IDLE;
 
-                // 只有当接收到新数据时才进行处理
-                if (uart_rx_done) begin
-                    
-                    // --- 1. 收到分隔符 (空格 0x20, 回车 0x0D, 换行 0x0A)，直接跳过，等待下一个字符
-                    if (uart_rx_data == 8'h20 || uart_rx_data == 8'h0D || uart_rx_data == 8'h0A) begin
-                        // Do nothing (Ignore separators)
+                // 如果处于 ERROR 状态，锁定直到 Confirm
+                if (rx_state == RX_ERROR) begin
+                    if (confirm_signal) begin
+                        rx_state <= RX_IDLE;
+                        input_error <= 1'b0;
+                        // 清理残留数据
+                        parse_val <= 0;
+                        parse_valid <= 0;
+                        target_rows <= 0;
+                        target_cols <= 0;
+                        elem_count <= 0;
                     end
-                    
-                    // --- 2. 处理有效数字字符 ('0'~'9' -> 0x30~0x39) ---
-                    else if (uart_rx_data >= 8'h30 && uart_rx_data <= 8'h39) begin
-
-                        case (rx_state)
-                            RX_IDLE: begin // 等待行数 (1-5)
-                                if (numeric_val >= 4'd1 && numeric_val <= 4'd5) begin
-                                    target_rows <= numeric_val[2:0];
-                                    input_error <= 1'b0;
-                                    rx_state <= RX_ROW;
-                                end else begin
-                                    // 输入了 '0' 或 '6'-'9'，超出范围
-                                    input_error <= 1'b1; 
-                                end
-                            end
-
-                            RX_ROW: begin // 等待列数 (1-5)
-                                if (numeric_val >= 4'd1 && numeric_val <= 4'd5) begin
-                                    target_cols <= numeric_val[2:0];
-                                    total_elements <= target_rows * numeric_val[2:0];
-                                    
-                                    // 查找存储槽位
-                                    curr_mat_id <= find_slot(target_rows, numeric_val[2:0]);
-                                    
-                                    // 准备清空内存
-                                    elem_count <= 5'd0; 
-                                    rx_state <= RX_CLEAR;
-                                    input_error <= 1'b0;
-                                end else begin
-                                    input_error <= 1'b1;
-                                    rx_state <= RX_IDLE;
-                                end
-                            end
-
-                            // RX_CLEAR 状态不需要在这里处理，因为它不依赖 uart_rx_done
-                            // 它会在下面的 else 逻辑中自动运行
-
-                            RX_DATA: begin // 等待矩阵元素 (0-9)
-                                if (elem_count < total_elements) begin
-                                    // 这里 numeric_val 已经是 0-9 了，直接存
-                                    mem_data[curr_mat_id][curr_row * 5 + curr_col] <= numeric_val;
-                                    input_error <= 1'b0;
-                                    elem_count <= elem_count + 1;
-                                    
-                                    // 地址更新逻辑
-                                    if (curr_col == target_cols - 1) begin
-                                        curr_col <= 3'd0;
-                                        curr_row <= curr_row + 1;
+                    // 否则，忽略所有 uart_rx_data，保持报错灯亮
+                end
+                
+                else begin 
+                    // 1. UART 数据处理
+                    if (uart_rx_done) begin
+                        
+                        // === Case A: 数字 (引入即时预判)===
+                        if (is_digit) begin
+                            // 这里不只是盲目接收，而是判断接收后是否会超标
+                            case (rx_state)
+                                RX_IDLE, RX_ROW: begin
+                                    // 维度限制: 1-5。如果累计值 > 5，立刻报错
+                                    // 注意：如果 lookahead_val 是 0 (输入了0)，暂时允许，
+                                    // 因为可能是 '0' 后面跟 '1' (虽然不规范，但真正检查在空格处)，
+                                    // 主要是为了拦截 > 5 的情况 (比如输入 6, 7, 8, 9, 12 等)
+                                    if (lookahead_val > 5 && lookahead_val < 200) begin
+                                        input_error <= 1'b1;
+                                        rx_state <= RX_ERROR;
                                     end else begin
-                                        curr_col <= curr_col + 1;
+                                        parse_val <= lookahead_val;
+                                        parse_valid <= 1'b1;
+                                    end
+                                end
+                                
+                                RX_DATA: begin
+                                    // 元素限制: 0-9。如果累计值 > 9，立刻报错
+                                    if (lookahead_val > 9 && lookahead_val < 200) begin
+                                        input_error <= 1'b1;
+                                        rx_state <= RX_ERROR;
+                                    end else begin
+                                        parse_val <= lookahead_val;
+                                        parse_valid <= 1'b1;
+                                    end
+                                end
+                                
+                                default: begin // 其他状态，默认接收
+                                    parse_val <= lookahead_val;
+                                    parse_valid <= 1'b1;
+                                end
+                            endcase
+                        end
+                        
+                        // === Case B: 分隔符 (空格/回车) ===
+                        else if (is_separator) begin
+                            if (parse_valid) begin
+                                case (rx_state)
+                                    // 1. 行数
+                                    RX_IDLE: begin 
+                                        if (parse_val >= 1 && parse_val <= 5) begin
+                                            target_rows <= parse_val[2:0];
+                                            rx_state <= RX_ROW;
+                                        end else begin
+                                            // 维度错误 -> 进入死锁状态 RX_ERROR
+                                            input_error <= 1'b1;
+                                            rx_state <= RX_ERROR;
+                                        end
                                     end
 
-                                    // 如果这是最后一个元素，跳转到 Confirm
-                                    if (elem_count + 1 == total_elements) 
-                                        rx_state <= RX_CONFIRM;
-                                end else begin
-                                    rx_state <= RX_OVERFLOW;
-                                end
+                                    // 2. 列数
+                                    RX_ROW: begin 
+                                        if (parse_val >= 1 && parse_val <= 5) begin
+                                            target_cols <= parse_val[2:0];
+                                            total_elements <= target_rows * parse_val[2:0];
+                                            
+                                            find_and_allocate(target_rows, parse_val[2:0], curr_mat_id, tmp_error_flag, tmp_overwrite_flag);
+                                            is_overwrite_mode <= tmp_overwrite_flag;
+
+                                            if (tmp_error_flag == 0) begin
+                                                elem_count <= 5'd0;
+                                                rx_state <= RX_CLEAR; // 分配成功，去清内存
+                                            end else begin
+                                                // 物理满了，不算格式错误，回到 IDLE
+                                                rx_state <= RX_IDLE; 
+                                            end
+                                        end else begin
+                                            // 维度错误 -> 进入死锁状态 RX_ERROR
+                                            input_error <= 1'b1; 
+                                            rx_state <= RX_ERROR;
+                                        end
+                                    end
+
+                                    // 3. 数据元素
+                                    RX_DATA: begin 
+                                        if (parse_val >= 0 && parse_val <= 9) begin
+                                            if (elem_count < total_elements) begin
+                                                mem_data[curr_mat_id][curr_row * 5 + curr_col] <= parse_val[3:0];
+                                                elem_count <= elem_count + 1;
+                                                
+                                                // 坐标更新
+                                                if (curr_col == target_cols - 1) begin
+                                                    curr_col <= 3'd0;
+                                                    curr_row <= curr_row + 1;
+                                                end else begin
+                                                    curr_col <= curr_col + 1;
+                                                end
+
+                                                // 自动完成
+                                                if (elem_count + 1 == total_elements) begin
+                                                    mem_rows[curr_mat_id] <= target_rows;
+                                                    mem_cols[curr_mat_id] <= target_cols;
+                                                    if (!is_overwrite_mode && mat_count < HARD_MAX_MATRICES)
+                                                        mat_count <= mat_count + 1;
+                                                    
+                                                    input_complete <= 1'b1;
+                                                    rx_state <= RX_IDLE;
+                                                    target_rows <= 0; target_cols <= 0; elem_count <= 0;
+                                                end
+                                            end
+                                        end else begin
+                                            // 元素值错误 -> 进入死锁状态 RX_ERROR
+                                            input_error <= 1'b1;
+                                            rx_state <= RX_ERROR;
+                                        end
+                                    end
+                                    
+                                    default: ;
+                                endcase
+                                // 清空缓冲区
+                                parse_val <= 0;
+                                parse_valid <= 0;
                             end
-                            
-                            default: ; // 其他状态忽略输入
-                        endcase
+                        end
+                        
+                        // === Case C: 非法字符 ===
+                        else begin
+                            // 输入了字母 -> 进入死锁状态 RX_ERROR
+                            input_error <= 1'b1;
+                            rx_state <= RX_ERROR;
+                            parse_val <= 0;
+                            parse_valid <= 0;
+                        end
+                    end 
+
+                    // 2. 自动清零 (RX_CLEAR)
+                    else if (rx_state == RX_CLEAR) begin
+                        if (elem_count < 25) begin
+                            mem_data[curr_mat_id][elem_count] <= 4'd0;
+                            elem_count <= elem_count + 1;
+                        end else begin
+                            rx_state <= RX_DATA;
+                            curr_row <= 3'd0;
+                            curr_col <= 3'd0;
+                            elem_count <= 5'd0;
+                            parse_val <= 0;
+                            parse_valid <= 0;
+                        end
                     end
-                    
-                    // --- 3. 非法字符 (既不是分隔符，也不是数字) ---
-                    else begin
-                        // 例如输入了字母 'a'，报错
-                        input_error <= 1'b1;
+
+                    // 3. Confirm 信号处理 (在正常状态下按 Confirm)
+                    if (confirm_signal) begin
+                        if (rx_state == RX_DATA) begin
+                            if (parse_valid) begin
+                                // 缓冲区还有数据 (比如 "12" 且之前没被 error 拦截，这理论上不可能发生，除非是 "9")
+                                // 因为 digit 阶段已经预判了，所以这里的 parse_val 肯定是 <=9 的
+                                if (parse_val <= 9) begin
+                                    if (elem_count < total_elements) begin
+                                        mem_data[curr_mat_id][curr_row * 5 + curr_col] <= parse_val[3:0];
+                                    end
+                                    mem_rows[curr_mat_id] <= target_rows;
+                                    mem_cols[curr_mat_id] <= target_cols;
+                                    if (!is_overwrite_mode && mat_count < HARD_MAX_MATRICES) 
+                                        mat_count <= mat_count + 1;
+                                    input_complete <= 1'b1;
+                                    rx_state <= RX_IDLE;
+                                    input_error <= 0;
+                                end else begin
+                                    input_error <= 1'b1;
+                                    rx_state <= RX_ERROR;
+                                end
+                            end else begin
+                                // 正常结束
+                                mem_rows[curr_mat_id] <= target_rows;
+                                mem_cols[curr_mat_id] <= target_cols;
+                                if (!is_overwrite_mode && mat_count < HARD_MAX_MATRICES) 
+                                    mat_count <= mat_count + 1;
+                                input_complete <= 1'b1;
+                                rx_state <= RX_IDLE;
+                                input_error <= 0;
+                            end
+                        end 
+                        else if (rx_state == RX_IDLE) begin
+                            input_error <= 0;
+                        end
+                        else begin
+                            rx_state <= RX_IDLE;
+                            input_error <= 0;
+                        end
+                        
+                        if (rx_state != RX_ERROR) begin
+                            target_rows <= 0; target_cols <= 0; elem_count <= 0;
+                            parse_val <= 0; parse_valid <= 0;
+                        end
                     end
                 end 
-                
-                // 处理不需要 UART 输入的自动跳转状态 (RX_CLEAR)
-                // 注意：这里要把 RX_CLEAR 移出 uart_rx_done 的判断块，或者像之前一样独立处理
-                else if (rx_state == RX_CLEAR) begin
-                     if (elem_count < 25) begin
-                         mem_data[curr_mat_id][elem_count] <= 4'd0;
-                         elem_count <= elem_count + 1;
-                     end else begin
-                         rx_state <= RX_DATA;
-                         curr_row <= 3'd0;
-                         curr_col <= 3'd0;
-                         elem_count <= 5'd0;
-                     end
-                end
-                
-                // 提前按 Confirm 逻辑
-                if (confirm_signal) begin
-                    if (rx_state == RX_DATA || rx_state == RX_OVERFLOW) 
-                        rx_state <= RX_CONFIRM;
-                end
-                
-                // RX_CONFIRM 逻辑
-                if (rx_state == RX_CONFIRM) begin
-                    mem_rows[curr_mat_id] <= target_rows;
-                    mem_cols[curr_mat_id] <= target_cols;
-                    if (mat_count < user_set_limit) mat_count <= mat_count + 1;
-                    input_complete <= 1'b1;
-                    rx_state <= RX_IDLE;
-                    target_rows <= 3'd0;
-                    target_cols <= 3'd0;
-                    elem_count <= 5'd0;
-                end
             end
-
             // -----------------------------------------------------------------
-            // B. GENERATOR 模式
+            // B. GENERATOR
             // -----------------------------------------------------------------
             else if (current_state == S_GENERATOR) begin
                 rx_state <= RX_IDLE;
                 input_error <= 1'b0;
                 case (gen_state)
                     GEN_IDLE: begin
-                        // 这里也要用 ASCII 判断
                         if (uart_rx_done && uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
                             gen_rows <= numeric_val[2:0];
                             gen_state <= GEN_COL;
@@ -339,8 +456,12 @@ module matrix_storage_unit #(
                             gen_mat_count_target <= numeric_val[1:0];
                             gen_mat_idx <= 2'd0;
                             gen_elem_idx <= 5'd0;
-                            gen_slot <= find_slot(gen_rows, gen_cols);
-                            gen_state <= GEN_WORKING;
+                            // 调用分配逻辑
+                            find_and_allocate(gen_rows, gen_cols, gen_slot, input_error, is_overwrite_mode);
+                            if (!input_error) 
+                                gen_state <= GEN_WORKING;
+                            else 
+                                gen_state <= GEN_IDLE;
                         end
                     end
                     GEN_WORKING: begin
@@ -350,11 +471,17 @@ module matrix_storage_unit #(
                         end else begin
                             mem_rows[gen_slot] <= gen_rows;
                             mem_cols[gen_slot] <= gen_cols;
-                            if (mat_count < user_set_limit) mat_count <= mat_count + 1;
+                            
+                            if (!is_overwrite_mode && mat_count < HARD_MAX_MATRICES) 
+                                mat_count <= mat_count + 1;
+                            // 如果需要生成多个
                             if (gen_mat_idx + 1 < gen_mat_count_target) begin
                                 gen_mat_idx <= gen_mat_idx + 1;
-                                gen_elem_idx <= 5'd0;
-                                gen_slot <= find_slot(gen_rows, gen_cols);
+                                gen_elem_idx <= 0;
+                                // 再次查找分配下一个
+                                find_and_allocate(gen_rows, gen_cols, gen_slot, input_error, is_overwrite_mode);
+                                // 如果此时 input_error 变 1，说明满了，无法继续生成
+                                if (input_error) gen_state <= GEN_DONE;
                             end else begin
                                 gen_state <= GEN_DONE;
                             end

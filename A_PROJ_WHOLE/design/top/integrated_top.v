@@ -45,32 +45,21 @@ module integrated_top (
     output reg dk8_en
 );
 
+
 // Internal UART work indicators
 wire uart_tx_work = uart_tx_rst_n;
 wire uart_rx_work = uart_rx_rst_n;
 
-// storage unit signals
-wire storage_input_error;     // 状态反馈信号
-wire [2:0] storage_mat_count; // 连接到模块输出
-
-wire [2:0] dim_row_A, dim_col_A;
-wire [3:0] read_data_A;
-wire [4:0] read_addr_A; // 地址由运算模块控制(暂未实现)
-
-wire [2:0] dim_row_B, dim_col_B;
-wire [3:0] read_data_B;
-wire [4:0] read_addr_B; // 地址由运算模块控制(暂未实现)
-
-// 内部寄存器，用于记录状态机触发的错误。input和operate共用这个
-reg error_flag;
+// Internal error flag
+reg  error_flag;
 
 //==========================================================================
 // 1. 主参数定义
 //==========================================================================
 localparam CLK_FREQ   = 100_000_000;  // uart
 localparam BAUD_RATE  = 115200;       // uart
-localparam MAX_MATRICES = 7;
-localparam MAX_DIM    = 5;
+localparam MAX_MATRICES = 15;
+localparam PTR_WIDTH    = 4;
 
 //======================================================================
 // 2. input decode
@@ -83,7 +72,7 @@ wire [3:0] count_down_input = sw_right[5:2]; // countdown input
 wire [2:0] matrix_limit_input_preview = sw_right[5:3]; // matrix per type limit input
 wire [2:0] operand1_id = sw_right[5:3]; // operand 1 matrix ID
 wire [2:0] operand2_id = sw_right[2:0]; // operand 2 matrix ID
-
+wire [2:0] dim_input = sw_right[2:0]; // Input for Operand Selector (Teammate's logic)
 //======================================================================
 // 3. Debounce modules
 //======================================================================
@@ -127,7 +116,7 @@ localparam S_OP_J      = 4'd10;  // 卷积
 // settings sub-FSM
 localparam S_SE_n      = 4'd11;  // 每规格矩阵数量上限
 localparam S_SE_c      = 4'd12;  // 倒计时秒数（5~15），默认10
-localparam S_SE_r      = 4'd13;  // 元素范围（默认 0–9）
+localparam S_SE_r      = 4'd13;  // 元素范围（默认 0-9）
 
 reg [3:0] state, state_next;
 
@@ -307,7 +296,7 @@ reg [2:0] setting_max_per_dim;
 
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-        // 复位时的默认值2
+        // 复位时的默认值4
         setting_max_per_dim <= 3'd2; 
     end else begin
         // 只有在 "S_SE_n" 状态下，且按下 Confirm 时，才更新值
@@ -340,42 +329,29 @@ uart_rx #(
     .rx_done(uart_rx_done)
 );
 
-// UART TX
+// --- Sub-module UART TX signals ---
+wire [7:0] display_tx_data;
+wire       display_tx_start;
+wire       display_busy;
+
+wire [7:0] summary_tx_data;
+wire       summary_tx_start;
+wire       summary_busy;
+
+wire [7:0] selector_tx_data;
+wire       selector_tx_start;
+wire       selector_busy;
+wire       selector_done; // Needed for LED/Status
+
+// --- UART TX Mux (Priority: Selector > Summary > Display) ---
 wire [7:0] tx_data_mux;
 wire       tx_start_mux;
 wire       tx_busy;
 
-// 矩阵展示模块的 UART 信号
-wire [7:0] display_tx_data;
-wire       display_tx_start;
-wire       display_busy;
-wire       display_done;
-wire [2:0] display_read_id;
-wire [4:0] display_read_addr;
-
-// 矩阵摘要模块的 UART 信号
-wire [7:0] summary_tx_data;
-wire       summary_tx_start;
-wire       summary_busy;
-wire       summary_done;
-wire [2:0] summary_read_id;
-
-// 运算数选择模块的 UART 信号
-wire [7:0] selector_tx_data;
-wire       selector_tx_start;
-wire       selector_busy;
-wire       selector_done;
-wire       selector_error;
-wire [2:0] selector_read_id;
-wire [4:0] selector_read_addr;
-wire [2:0] selected_operand_id;
-wire [2:0] selected_operand_row;
-wire [2:0] selected_operand_col;
-
-// UART TX 多路复用: 优先级 selector > summary > display
 assign tx_data_mux  = selector_busy ? selector_tx_data :
                       summary_busy  ? summary_tx_data  :
                       display_busy  ? display_tx_data  : 8'd0;
+
 assign tx_start_mux = selector_busy ? selector_tx_start :
                       summary_busy  ? summary_tx_start :
                       display_busy  ? display_tx_start : 1'b0;
@@ -395,222 +371,221 @@ uart_tx #(
 //==========================================================================
 // 7. 矩阵存储单元实例化 (Matrix Storage Unit)
 //==========================================================================
-// 地址选择: 各模块工作时使用其地址，否则使用运算地址
-wire [4:0] read_addr_A_calc = 5'd0; // 计算模块的地址 (待实现)
-wire [4:0] read_addr_B_calc = 5'd0; // 计算模块的地址 (待实现)
+// Storage signals
+wire storage_input_error;
+wire [PTR_WIDTH:0] storage_mat_count;
+wire [2:0] dim_row_A, dim_col_A;
+wire [3:0] read_data_A;
+wire [4:0] read_addr_A; 
+wire [2:0] dim_row_B, dim_col_B;
+wire [3:0] read_data_B;
+wire [4:0] read_addr_B; 
 
-// 读取 ID 选择: 优先级 selector > summary > display > 默认
-wire [2:0] read_id_A_mux;
-assign read_addr_A = selector_busy ? selector_read_addr :
-                     display_busy  ? display_read_addr  : read_addr_A_calc;
-assign read_id_A_mux = selector_busy ? selector_read_id :
-                       summary_busy  ? summary_read_id  :
-                       display_busy  ? display_read_id  : operand1_id;
-assign read_addr_B = 5'd0;
+// 子模块读取请求信号 (来自各个功能模块)
+wire [PTR_WIDTH-1:0] display_read_id;
+wire [4:0]           display_read_addr;
+wire [PTR_WIDTH-1:0] summary_read_id;
+wire [PTR_WIDTH-1:0] selector_read_id;
+wire [4:0]           selector_read_addr;
 
+// 计算模块读取请求  [占位/预留]
+wire [PTR_WIDTH-1:0] calc_read_id_A = {1'b0, operand1_id}; // 物理开关只有3位，高位补零 
+wire [4:0]           calc_read_addr_A = 5'd0; 
+
+// --- 端口 A 多路复用 (Priority: Selector > Summary > Display > Calc/Default) ---
+wire [PTR_WIDTH-1:0] mux_read_id_A;
+wire [4:0]           mux_read_addr_A;
+
+assign mux_read_addr_A = selector_busy ? selector_read_addr :
+                         display_busy  ? display_read_addr  : 
+                         calc_read_addr_A; // Summary doesn't use addr
+
+assign mux_read_id_A   = selector_busy ? selector_read_id :
+                         summary_busy  ? summary_read_id  :
+                         display_busy  ? display_read_id  : 
+                         calc_read_id_A;
+
+// --- 端口 B (专供 Calculator)
+assign read_addr_B = 5'd0;   // [预留]
+
+// 实例化用户的存储单元 (Matrix Storage Unit)
+// 使用 HARD_MAX 15 和每种规格上限设置
 matrix_storage_unit #(
-    .HARD_MAX_MATRICES(15), 
-    .PTR_WIDTH(4)
+    .HARD_MAX_MATRICES(MAX_MATRICES), 
+    .PTR_WIDTH(PTR_WIDTH)
 ) u_matrix_store (
     .clk            (clk),
     .rst_n          (rst_n),
+    .max_per_dim    (setting_max_per_dim), 
 
-    .max_per_dim    (setting_max_per_dim), // 同规格矩阵数量上限
-
-    // 1. 控制信号
+    // Control
     .current_state  (state),         
     .confirm_signal (confirm_flag),  
 
-    // 2. 数据输入源 (UART)
+    // Data Input
     .uart_rx_data   (uart_rx_data),
     .uart_rx_done   (uart_rx_done),  
 
-    // 3. 数据输出 - 端口 A (连接到 Operand 1 / 展示模块)
-    .read_id_A      (read_id_A_mux), // 展示时使用展示模块ID，否则使用operand1_id
-    .dim_row_A      (dim_row_A),     // 输出：矩阵1的行数
-    .dim_col_A      (dim_col_A),     // 输出：矩阵1的列数
-    .read_addr_A    (read_addr_A),   // 输入：计算器想读哪个格子(0-24)
-    .read_data_A    (read_data_A),   // 输出：那个格子的数据
+    // Port A (Muxed)
+    .read_id_A      (mux_read_id_A), 
+    .dim_row_A      (dim_row_A),     
+    .dim_col_A      (dim_col_A),     
+    .read_addr_A    (mux_read_addr_A),   
+    .read_data_A    (read_data_A),   
 
-    // 3. 数据输出 - 端口 B (连接到 Operand 2)
-    .read_id_B      (operand2_id),   // 顶层定义的运算数2选择子
+    // Port B (Operand 2)
+    .read_id_B      ({1'b0, operand2_id}),   
     .dim_row_B      (dim_row_B),
     .dim_col_B      (dim_col_B),
     .read_addr_B    (read_addr_B),
     .read_data_B    (read_data_B),
 
-    // 4. 状态反馈
+    // Feedback
     .input_error    (storage_input_error),
-    .mat_count_out  (storage_mat_count)
+    .mat_count_out  (storage_mat_count)  // 当前存储矩阵总数
 );
 
 //==========================================================================
 // 8. 矩阵 UART 展示模块实例化 (Matrix UART Display)
 //==========================================================================
-// 展示模块读取端口 (复用端口 A 的输出)
-wire [2:0] display_dim_row = dim_row_A;
-wire [2:0] display_dim_col = dim_col_A;
-wire [3:0] display_read_data = read_data_A;
 
-// 展示触发信号: 在 S_DISPLAYER 状态下按发送键，且 sw[1]=0 (非摘要模式)
+// --- A. 矩阵内容 UART 展示模块 (Matrix UART Display) ---
+// 触发条件: 处于 S_DISPLAYER 状态, 按下 Send 键, 且 sw[1]=0 (非摘要模式)
 reg display_start_pulse;
 always @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-        display_start_pulse <= 1'b0;
-    end else begin
-        display_start_pulse <= 1'b0;
-        // sw[1]=0 时展示矩阵内容，sw[1]=1 时展示摘要
+    if (!rst_n) display_start_pulse <= 1'b0;
+    else begin
+        display_start_pulse <= 1'b0; // 默认为0，形成脉冲
+        // 只有在空闲且符合条件时才触发
         if (state == S_DISPLAYER && send_flag && !sw[1] && !display_busy && !summary_busy) begin
             display_start_pulse <= 1'b1;
         end
     end
 end
 
-// 展示所有矩阵 or 单个矩阵: sw[0] = 1 表示展示所有
+// 开关控制: sw[0]=1 表示展示所有矩阵
 wire display_all_matrices = sw[0];
 
-// 为了让 Display 模块能读到数据，我们需要把 Storage Port A 的输出喂给它
-// 注意：因为上面做了 MUX，当 display_busy=1 时，read_data_A 输出的就是 Display 请求的数据
+// 数据管道: 将存储单元端口 A 的输出信号引过来
 wire [2:0] display_dim_row_in = dim_row_A;
 wire [2:0] display_dim_col_in = dim_col_A;
 wire [3:0] display_read_data_in = read_data_A;
 
 matrix_uart_display #(
-    .PTR_WIDTH(4)  // 确保这里的参数与 storage 一致
+    .PTR_WIDTH(PTR_WIDTH) // 与存储单元参数保持同步 (4位)
 ) u_matrix_display (
     .clk            (clk),
     .rst_n          (rst_n),
-    
-    // 控制信号
     .start_display  (display_start_pulse),
-    .matrix_id      (operand1_id),          // 使用 sw_right[5:3] 选择要展示的矩阵
-    .display_all    (display_all_matrices), // sw[0]=1 展示所有矩阵
-    .mat_count      (storage_mat_count),
+    .matrix_id      ({1'b0, operand1_id}),       // 初始选中的矩阵ID
+    .display_all    (display_all_matrices),
+    .mat_count      (storage_mat_count), // 当前存储的矩阵总数
     
-    // 矩阵数据接口 (连接到存储单元的端口 A)
-    .read_id        (display_read_id),
-    .read_addr      (display_read_addr),
-    .read_data      (display_read_data),
-    .dim_row        (display_dim_row),
-    .dim_col        (display_dim_col),
+    // 连接到存储单元的接口
+    .read_id        (display_read_id),   // 输出: 告诉存储单元读哪个ID
+    .read_addr      (display_read_addr), // 输出: 告诉存储单元读哪个地址
+    .read_data      (display_read_data_in), // 输入: 存储单元返回的数据
+    .dim_row        (display_dim_row_in),   // 输入: 存储单元返回的行数
+    .dim_col        (display_dim_col_in),   // 输入: 存储单元返回的列数
     
-    // UART TX 接口
+    // UART 接口
     .tx_data        (display_tx_data),
     .tx_start       (display_tx_start),
     .tx_busy        (tx_busy),
-    
-    // 状态输出
-    .busy           (display_busy),
-    .done           (display_done)
+    .busy           (display_busy), // 输出忙碌信号
+    .done           () // 完成信号悬空 (本模块不需要处理完成信号)
 );
 
-//==========================================================================
-// 8.1 矩阵摘要展示模块 (Matrix Summary Display)
-// 功能: 显示存储矩阵摘要，格式: 总数 m*n*x m*n*x ...
-// 触发: 在 S_DISPLAYER 状态下，sw[1]=1 时按 send 键
-//==========================================================================
-// 摘要显示触发：sw[1]=1 表示显示摘要而不是矩阵内容
-wire display_summary_mode = sw[1];
-
+// --- B. 矩阵摘要展示模块 (队友的模块) ---
+// 触发条件: 处于 S_DISPLAYER 状态, 按下 Send 键, 且 sw[1]=1 (摘要模式)
 reg summary_start_pulse;
 always @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
+    if (!rst_n) summary_start_pulse <= 1'b0;
+    else begin
         summary_start_pulse <= 1'b0;
-    end else begin
-        summary_start_pulse <= 1'b0;
-        // 在 S_DISPLAYER 状态，sw[1]=1，按 send 键触发摘要显示
-        if (state == S_DISPLAYER && send_flag && display_summary_mode && !summary_busy && !display_busy) begin
+        if (state == S_DISPLAYER && send_flag && sw[1] && !summary_busy && !display_busy) begin
             summary_start_pulse <= 1'b1;
         end
     end
 end
 
 matrix_summary_display #(
-    .MAX_MATRICES(15),
-    .PTR_WIDTH(4)
+    .MAX_MATRICES(MAX_MATRICES),
+    .PTR_WIDTH(PTR_WIDTH) // 重要: 必须使用 4 位以匹配你的存储设计
 ) u_matrix_summary (
     .clk            (clk),
     .rst_n          (rst_n),
-    
-    // 控制信号
     .start_display  (summary_start_pulse),
     .mat_count      (storage_mat_count),
     
-    // 矩阵维度读取接口
+    // 连接到存储单元的接口 (复用端口 A)
+    // 摘要模块只需要读维度(row/col)，不需要读具体数据(read_data)
     .read_id        (summary_read_id),
-    .dim_row        (dim_row_A),        // 复用存储单元端口A的维度输出
+    .dim_row        (dim_row_A),        
     .dim_col        (dim_col_A),
     
-    // UART TX 接口
+    // UART 接口
     .tx_data        (summary_tx_data),
     .tx_start       (summary_tx_start),
     .tx_busy        (tx_busy),
-    
-    // 状态输出
     .busy           (summary_busy),
-    .done           (summary_done)
+    .done           () // 完成信号悬空
 );
 
-//==========================================================================
-// 8.2 运算数选择模块 (Operand Selector)
-// 功能: 用户选择运算数的交互流程
-// 流程: 输入行数 → 输入列数 → 显示匹配矩阵 → 选择编号 → 显示选中矩阵
-// 触发: 在运算子状态 (S_OP_T/A/B/C/J) 下按 send 键开始选择
-//==========================================================================
-
-// 运算数选择启动脉冲
+// --- C. 运算数选择模块 (队友的模块) ---
+// 触发条件: 处于任何运算子状态 (S_OP_*) 且按下 Send 键
 reg selector_start_pulse;
-// 维度输入 (复用 sw_right[2:0])
-wire [2:0] dim_input = sw_right[2:0];
-
-// 判断是否在运算子状态
-wire in_op_substate = (state == S_OP_T) || (state == S_OP_A) || 
+// 判断当前是否处于运算子状态
+wire in_op_substate = (state == S_OP_T) || (state == S_OP_A) ||
                       (state == S_OP_B) || (state == S_OP_C) || (state == S_OP_J);
 
 always @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
+    if (!rst_n) selector_start_pulse <= 1'b0;
+    else begin
         selector_start_pulse <= 1'b0;
-    end else begin
-        selector_start_pulse <= 1'b0;
-        // 在运算子状态下，按 send 键启动选择流程
+        // 只有当 UART 不忙且其他展示模块也不忙时才触发
         if (in_op_substate && send_flag && !selector_busy && !display_busy && !summary_busy) begin
             selector_start_pulse <= 1'b1;
         end
     end
 end
 
+wire selector_error;
+wire [PTR_WIDTH-1:0] selected_operand_id; // 选择器最终选中的矩阵 ID
+
 operand_selector #(
-    .MAX_MATRICES(15),
-    .PTR_WIDTH(4)
+    .MAX_MATRICES(MAX_MATRICES),
+    .PTR_WIDTH(PTR_WIDTH) // 重要: 使用 4 位
 ) u_operand_selector (
     .clk            (clk),
     .rst_n          (rst_n),
-    
-    // 控制接口
     .start          (selector_start_pulse),
     .confirm        (confirm_flag),
-    .dim_input      (dim_input),        // sw_right[2:0] 用于输入维度/编号
+    .dim_input      (dim_input),        // 来自右侧开关 sw_right[2:0] 的输入
     .mat_count      (storage_mat_count),
     
-    // 矩阵存储接口
+    // 连接到存储单元的接口
     .read_id        (selector_read_id),
     .read_addr      (selector_read_addr),
     .dim_row        (dim_row_A),
     .dim_col        (dim_col_A),
     .read_data      (read_data_A),
     
-    // UART TX 接口
+    // UART 接口
     .tx_data        (selector_tx_data),
     .tx_start       (selector_tx_start),
     .tx_busy        (tx_busy),
     
-    // 状态输出
+    // 状态与结果输出
     .busy           (selector_busy),
-    .done           (selector_done),
+    .done           (selector_done),    // 用于驱动 LED 或状态机
     .error          (selector_error),
-    .selected_id    (selected_operand_id),
-    .selected_row   (selected_operand_row),
-    .selected_col   (selected_operand_col)
+    .selected_id    (selected_operand_id), // 我们只需要这个 ID
+    
+    // (可选: 接收选中矩阵的行/列。此处为了保持顶层简洁，选择悬空不连接，
+    //  因为后续计算可以直接通过 ID 从存储单元获取这些信息)
+    .selected_row   (), 
+    .selected_col   ()
 );
 
 //==========================================================================
@@ -625,7 +600,7 @@ wire       countdown_timeout; // 如果后续需要处理超时事件(比如自�
 reg        start_countdown;   
 
 countdown_unit #(
-    .CLK_FREQ(100_000_000)    // 仿真时可以改为小数值
+    .CLK_FREQ(CLK_FREQ)    // 仿真时可以改为小数值
 ) u_countdown (
     .clk            (clk),
     .rst_n          (rst_n),
@@ -726,25 +701,7 @@ end
 //==========================================================================
 // LED logic
 //==========================================================================
-// 按下 Confirm 键，才清除错误灯
-reg led_error_latch;
-always @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-        led_error_latch <= 1'b0;
-    end
-    else begin
-        // 1. 如果有任何错误发生，锁存住（变亮）
-        if (storage_input_error || error_flag) begin
-            led_error_latch <= 1'b1;
-        end
-        // 2. 只有按下 Confirm 键，才清除错误灯（变灭）
-        else if (confirm_flag) begin
-            led_error_latch <= 1'b0;
-        end
-    end
-end
-
-assign led_error = led_error_latch;
+assign led_error = error_flag | storage_input_error | selector_error;
 assign led_idle  = (state == S_MENU);
 assign led_busy  = countdown_active || selector_busy || (state >= S_OP_T && state <= S_OP_J);
 assign led_done  = calc_done || selector_done;
