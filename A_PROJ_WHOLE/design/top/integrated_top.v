@@ -343,18 +343,26 @@ wire       selector_tx_start;
 wire       selector_busy;
 wire       selector_done; // Needed for LED/Status
 
-// --- UART TX Mux (Priority: Selector > Summary > Display) ---
+// --- 计算结果展示模块 UART 信号 ---
+wire [7:0] result_display_tx_data;
+wire       result_display_tx_start;
+wire       result_display_busy;
+wire       result_display_done;
+
+// --- UART TX Mux (Priority: ResultDisplay > Selector > Summary > Display) ---
 wire [7:0] tx_data_mux;
 wire       tx_start_mux;
 wire       tx_busy;
 
-assign tx_data_mux  = selector_busy ? selector_tx_data :
-                      summary_busy  ? summary_tx_data  :
-                      display_busy  ? display_tx_data  : 8'd0;
+assign tx_data_mux  = result_display_busy ? result_display_tx_data :
+                      selector_busy       ? selector_tx_data       :
+                      summary_busy        ? summary_tx_data        :
+                      display_busy        ? display_tx_data        : 8'd0;
 
-assign tx_start_mux = selector_busy ? selector_tx_start :
-                      summary_busy  ? summary_tx_start :
-                      display_busy  ? display_tx_start : 1'b0;
+assign tx_start_mux = result_display_busy ? result_display_tx_start :
+                      selector_busy       ? selector_tx_start       :
+                      summary_busy        ? summary_tx_start        :
+                      display_busy        ? display_tx_start        : 1'b0;
 
 uart_tx #(
     .CLK_FREQ(CLK_FREQ),
@@ -388,17 +396,21 @@ wire [PTR_WIDTH-1:0] summary_read_id;
 wire [PTR_WIDTH-1:0] selector_read_id;
 wire [4:0]           selector_read_addr;
 
-// 计算模块读取请求  [占位/预留]
-wire [PTR_WIDTH-1:0] calc_read_id_A = {1'b0, operand1_id}; // 物理开关只有3位，高位补零 
-wire [4:0]           calc_read_addr_A = 5'd0; 
+// 计算模块读取请求 ID (前向声明 - 实际信号在后面模块实例化时连接)
+wire [PTR_WIDTH-1:0] calc_read_id_A = {1'b0, operand1_id}; // 物理开关只有3位，高位补零
+wire [4:0]           calc_read_addr_A_out;  // 来自 matrix_calculator
+wire [4:0]           calc_read_addr_B_out;  // 来自 matrix_calculator
+wire                 calc_busy;             // 来自 matrix_calculator 
 
 // --- 端口 A 多路复用 (Priority: Selector > Summary > Display > Calc/Default) ---
+// 注意: calc_read_addr_A_out 将在后面计算模块实例化后才声明为 wire
 wire [PTR_WIDTH-1:0] mux_read_id_A;
 wire [4:0]           mux_read_addr_A;
 
+// 地址选择：计算模块忙时使用计算模块请求的地址
 assign mux_read_addr_A = selector_busy ? selector_read_addr :
-                         display_busy  ? display_read_addr  : 
-                         calc_read_addr_A; // Summary doesn't use addr
+                         display_busy  ? display_read_addr  :
+                         calc_busy     ? calc_read_addr_A_out : 5'd0;
 
 assign mux_read_id_A   = selector_busy ? selector_read_id :
                          summary_busy  ? summary_read_id  :
@@ -406,7 +418,8 @@ assign mux_read_id_A   = selector_busy ? selector_read_id :
                          calc_read_id_A;
 
 // --- 端口 B (专供 Calculator)
-assign read_addr_B = 5'd0;   // [预留]
+// 计算模块忙时使用其请求的地址
+assign read_addr_B = calc_busy ? calc_read_addr_B_out : 5'd0;
 
 // 实例化用户的存储单元 (Matrix Storage Unit)
 // 使用 HARD_MAX 15 和每种规格上限设置
@@ -676,26 +689,140 @@ always @(posedge clk or negedge rst_n) begin
 end
 
 //==========================================================================
-// 矩阵计算核心 (来自 part_shl)
+// 矩阵计算核心 (来自 part_shl) - matrix_calculator 实例化
 //==========================================================================
-// 这里简化处理，实际需要实例化 matrix_calculate 模块
-reg        calc_start;
-reg        calc_done;
-reg [15:0] calc_result [0:24];
-reg [2:0]  result_rows, result_cols;
 
-// 初始化 calc_start 和 calc_done (避免 LED 不稳定)
-// TODO: 当实现真正的计算模块时，这些信号应由计算模块驱动
+// 操作码推导（根据当前状态自动生成）
+wire [2:0] calc_opcode;
+assign calc_opcode = (state == S_OP_T) ? 3'b000 :  // 转置
+                     (state == S_OP_A) ? 3'b001 :  // 加法
+                     (state == S_OP_B) ? 3'b010 :  // 标量乘
+                     (state == S_OP_C) ? 3'b011 :  // 矩阵乘
+                     3'b000;  // 默认
+
+// 计算模块其他信号 (calc_busy, calc_read_addr_A/B_out 已在前面声明)
+wire        calc_done;
+wire [2:0]  calc_result_rows;
+wire [2:0]  calc_result_cols;
+wire [4:0]  result_read_addr;
+wire [15:0] result_read_data;
+
+// 计算启动脉冲 & 结果显示启动
+reg calc_start_pulse;
+reg result_display_start;
+reg calc_active; // 记录是否启动过一次计算
+
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-        calc_start <= 1'b0;
-        calc_done  <= 1'b0;
+        calc_start_pulse <= 1'b0;
+        result_display_start <= 1'b0;
+        calc_active <= 1'b0;
     end else begin
-        // 暂时保持为 0，等待计算模块实现
-        calc_start <= 1'b0;
-        calc_done  <= 1'b0;
+        calc_start_pulse <= 1'b0;      // 形成单周期脉冲
+        result_display_start <= 1'b0;  // 形成单周期脉冲
+
+        // 计算完成且确实启动过计算时，自动显示结果
+        // 关键：必须确保 selector 不忙（避免在维度选择时误触发）
+        if (calc_active && calc_done && in_op_substate && !result_display_busy && !selector_busy) begin
+            result_display_start <= 1'b1;
+            calc_active <= 1'b0; // 本次显示后清除标记
+        end
+
+        // 在运算子状态下按确认键，且其他模块不忙时，检查验证后启动计算
+        // 关键：selector_busy 时不能启动计算
+        if (in_op_substate && confirm_flag && !selector_busy && !display_busy && !summary_busy && !result_display_busy && !calc_busy) begin
+            case (state)
+                S_OP_T: begin
+                    calc_start_pulse <= 1'b1;              // 转置：无需验证
+                    calc_active      <= 1'b1;
+                end
+                S_OP_A: if (add_valid) begin
+                    calc_start_pulse <= 1'b1;              // 加法：需通过验证
+                    calc_active      <= 1'b1;
+                end
+                S_OP_B: begin
+                    calc_start_pulse <= 1'b1;              // 标量乘：无需验证
+                    calc_active      <= 1'b1;
+                end
+                S_OP_C: if (mul_valid) begin
+                    calc_start_pulse <= 1'b1;              // 矩阵乘：需通过验证
+                    calc_active      <= 1'b1;
+                end
+                default: ;
+            endcase
+        end
+
+        // 离开运算子状态时清除 calc_active
+        if (!in_op_substate) begin
+            calc_active <= 1'b0;
+        end
     end
 end
+
+// 矩阵计算器实例化
+matrix_calculator #(
+    .MAX_DIM(5),
+    .DATA_WIDTH(4),
+    .RESULT_WIDTH(16)
+) u_matrix_calculator (
+    .clk            (clk),
+    .rst_n          (rst_n),
+    
+    // 控制接口
+    .start          (calc_start_pulse),
+    .opcode         (calc_opcode),
+    .scalar         (scalar_input[3:0]),  // 标量乘法使用的标量值
+    
+    // 矩阵 A 接口（来自存储单元端口 A）
+    .dim_row_A      (dim_row_A),
+    .dim_col_A      (dim_col_A),
+    .read_addr_A    (calc_read_addr_A_out),
+    .read_data_A    (read_data_A),
+    
+    // 矩阵 B 接口（来自存储单元端口 B）
+    .dim_row_B      (dim_row_B),
+    .dim_col_B      (dim_col_B),
+    .read_addr_B    (calc_read_addr_B_out),
+    .read_data_B    (read_data_B),
+    
+    // 结果输出接口
+    .busy           (calc_busy),
+    .done           (calc_done),
+    .result_rows    (calc_result_rows),
+    .result_cols    (calc_result_cols),
+    
+    // 结果读取接口
+    .result_read_addr  (result_read_addr),
+    .result_read_data  (result_read_data)
+);
+
+// 计算结果 UART 展示模块实例化
+calc_result_display #(
+    .MAX_DIM(5),
+    .RESULT_WIDTH(16)
+) u_calc_result_display (
+    .clk            (clk),
+    .rst_n          (rst_n),
+    
+    // 控制接口
+    .start_display  (result_display_start),
+    .result_rows    (calc_result_rows),
+    .result_cols    (calc_result_cols),
+    .op_type        (calc_opcode),
+    
+    // 结果数据接口
+    .result_read_addr (result_read_addr),
+    .read_data      (result_read_data),
+    
+    // UART TX 接口
+    .tx_data        (result_display_tx_data),
+    .tx_start       (result_display_tx_start),
+    .tx_busy        (tx_busy),
+    
+    // 状态输出
+    .busy           (result_display_busy),
+    .done           (result_display_done)
+);
 
 
 //==========================================================================
@@ -703,8 +830,8 @@ end
 //==========================================================================
 assign led_error = error_flag | storage_input_error | selector_error;
 assign led_idle  = (state == S_MENU);
-assign led_busy  = countdown_active || selector_busy || (state >= S_OP_T && state <= S_OP_J);
-assign led_done  = calc_done || selector_done;
+assign led_busy  = countdown_active || selector_busy || calc_busy || result_display_busy || (state >= S_OP_T && state <= S_OP_J);
+assign led_done  = calc_done || selector_done || result_display_done;
 
 // UART work indicators
 always @(*) begin
