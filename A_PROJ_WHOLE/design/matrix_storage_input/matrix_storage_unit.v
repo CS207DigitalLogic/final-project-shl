@@ -36,69 +36,98 @@ module matrix_storage_unit #(
     output wire [PTR_WIDTH:0] mat_count_out   
 );
     //==========================================================================
-    // 0. 参数与定义
+    // 0. 全局参数与定义
     //==========================================================================
+
+    // a. 核心存储堆 (Storage Heap)
+    reg [3:0]           mem_data [0:HARD_MAX_MATRICES-1][0:24]; // 矩阵数据
+    reg [2:0]           mem_rows [0:HARD_MAX_MATRICES-1];       // 行记录
+    reg [2:0]           mem_cols [0:HARD_MAX_MATRICES-1];       // 列记录
+    reg [PTR_WIDTH:0]   mat_count;                              // 当前总数
+    //--------------------------------------------------------------------------
+    // b. 状态机定义 (FSM Parameters)
+    //--------------------------------------------------------------------------
+    // 主状态机
     localparam S_INPUTER   = 4'd1;
     localparam S_GENERATOR = 4'd2;
 
-    // 存储堆
-    reg [3:0]  mem_data [0:HARD_MAX_MATRICES-1][0:24];
-    reg [2:0]  mem_rows [0:HARD_MAX_MATRICES-1];
-    reg [2:0]  mem_cols [0:HARD_MAX_MATRICES-1];
-    reg [PTR_WIDTH:0]  mat_count;
+    // --- Inputer 模式状态 ---
+    localparam RX_IDLE      = 3'd0; // 等待输入行 
+    localparam RX_ROW       = 3'd1; // 等待输入列 
+    localparam RX_DATA      = 3'd2; // 接收矩阵元素数据
+    localparam RX_ERROR     = 3'd3; // 错误死锁状态
+    localparam RX_CLEAR     = 3'd5; // 自动补0/清空内存
 
-    // 状态机
-    localparam RX_IDLE     = 3'd0; // 等待行
-    localparam RX_ROW      = 3'd1; // 等待列
-    localparam RX_DATA     = 3'd2; // 接收数据
-    localparam RX_ERROR    = 3'd3; // 错误状态
-    localparam RX_CLEAR    = 3'd5; // 清零内存 (实现补0功能)
-    
-    localparam GEN_IDLE    = 3'd0;
-    localparam GEN_COL     = 3'd2;
-    localparam GEN_COUNT   = 3'd3;
-    localparam GEN_WORKING = 3'd4;
-    localparam GEN_DONE    = 3'd5;
+    // --- Generator 模式状态 ---
+    localparam GEN_IDLE       = 3'd0; // 等待输入行 
+    localparam GEN_WAIT_COL   = 3'd1; // 等待输入列 
+    localparam GEN_WAIT_COUNT = 3'd2; // 等待输入数量 
+    localparam GEN_CHECK      = 3'd3; // 容量预检查 
+    localparam GEN_WORKING    = 3'd4; // 自动生成中
+    localparam GEN_DONE       = 3'd5; // 生成完成
+    localparam GEN_ERROR      = 3'd6; // 生成错误/超标
+    localparam GEN_ALLOC_NEXT = 3'd7; // 等待内存写入生效
 
+    // 状态寄存器
     reg [2:0] rx_state;
     reg [2:0] gen_state;
 
-    // 内部变量
-    reg [PTR_WIDTH-1:0] curr_mat_id;
-    reg [2:0] curr_row, curr_col;
-    reg [2:0] target_rows, target_cols;
-    reg [4:0] elem_count;
-    reg [4:0] total_elements;
-    reg       input_complete;
-    reg tmp_error_flag;      // 临时接收错误标志
-    reg tmp_overwrite_flag;  // 临时接收覆盖标志
+    //--------------------------------------------------------------------------
+    // c. UART 解析与辅助信号
+    //--------------------------------------------------------------------------
 
-    // Generator 变量
-    reg [2:0] gen_rows, gen_cols;
-    reg [1:0] gen_mat_count_target;
-    reg [1:0] gen_mat_idx;
-    reg [4:0] gen_elem_idx;
-    reg [PTR_WIDTH-1:0] gen_slot;
-
-    // 覆盖指针
-    reg [2:0] overwrite_ptr [1:5][1:5];
-    // 查找辅助变量
-    reg [PTR_WIDTH-1:0] match_indices [0:HARD_MAX_MATRICES-1];
-    reg is_overwrite_mode;
-
-    // ASCII 转换
-    wire [3:0] numeric_val = uart_rx_data[3:0];
-    // 用于累加多位数字
-    reg [7:0] parse_val;
-    // 标记当前 parse_val 是否包含有效数字
-    reg       parse_valid;
-
-    // 辅助信号
-    wire is_digit = (uart_rx_data >= 8'h30 && uart_rx_data <= 8'h39);
+    // 基础判断
+    wire is_digit     = (uart_rx_data >= 8'h30 && uart_rx_data <= 8'h39);
     wire is_separator = (uart_rx_data == 8'h20 || uart_rx_data == 8'h0D || uart_rx_data == 8'h0A);
+    wire [3:0] numeric_val = uart_rx_data[3:0]; // 单位数字直接提取
 
-    // 即时预判值，算出把当前接收到的数字加进去，结果多少
+    // 高级解析 (用于处理多位数)
+    reg [7:0] parse_val;   // 当前累加值缓冲区
+    reg       parse_valid; // 缓冲区有效标志
+    
+    // 预判值 (Lookahead): 用于在接收当前位时，预判是否溢出
     wire [7:0] lookahead_val = parse_val * 10 + (uart_rx_data - 8'h30);
+
+    //--------------------------------------------------------------------------
+    // d. Inputer 模式专用变量
+    //--------------------------------------------------------------------------
+
+    reg [PTR_WIDTH-1:0] curr_mat_id;
+    reg [2:0]           curr_row, curr_col;
+    reg [2:0]           target_rows, target_cols;
+    reg [4:0]           elem_count;
+    reg [4:0]           total_elements;
+    reg                 input_complete;
+    
+    // 临时标志位 (用于 find_and_allocate 的返回)
+    reg tmp_error_flag;      
+    reg tmp_overwrite_flag;  
+
+    //--------------------------------------------------------------------------
+    // e. Generator 模式专用变量
+    //--------------------------------------------------------------------------
+    reg [2:0]           gen_rows;
+    reg [2:0]           gen_cols;
+
+    reg [2:0]           gen_mat_count_target; 
+    reg [2:0]           gen_mat_idx;
+    
+    reg [4:0]           gen_elem_idx;
+    reg [PTR_WIDTH-1:0] gen_slot;
+    
+    // 循环辅助变量 (用于 GEN_CHECK 阶段统计数量)
+    integer idx_chk;
+    integer match_count_chk;
+
+    //--------------------------------------------------------------------------
+    // f. 分配与覆盖策略
+    //--------------------------------------------------------------------------
+
+    // 覆盖指针表: overwrite_ptr[row][col]
+    reg [2:0]           overwrite_ptr [1:5][1:5];
+    // 查找结果缓存
+    reg [PTR_WIDTH-1:0] match_indices [0:HARD_MAX_MATRICES-1];
+    reg                 is_overwrite_mode;
 
     //==========================================================================
     // 1. 读取逻辑
@@ -245,13 +274,11 @@ module matrix_storage_unit #(
                         
                         // === Case A: 数字 (引入即时预判)===
                         if (is_digit) begin
-                            // 这里不只是盲目接收，而是判断接收后是否会超标
                             case (rx_state)
                                 RX_IDLE, RX_ROW: begin
                                     // 维度限制: 1-5。如果累计值 > 5，立刻报错
-                                    // 注意：如果 lookahead_val 是 0 (输入了0)，暂时允许，
-                                    // 因为可能是 '0' 后面跟 '1' (虽然不规范，但真正检查在空格处)，
-                                    // 主要是为了拦截 > 5 的情况 (比如输入 6, 7, 8, 9, 12 等)
+                                    // 如果 lookahead_val 是 0 (输入了0)，暂时不报错，等到分隔符时再报
+                                    // 主要是为了拦截 > 5 的情况
                                     if (lookahead_val > 5 && lookahead_val < 200) begin
                                         input_error <= 1'b1;
                                         rx_state <= RX_ERROR;
@@ -433,64 +460,227 @@ module matrix_storage_unit #(
                 end 
             end
             // -----------------------------------------------------------------
-            // B. GENERATOR
+            // B. GENERATOR 
             // -----------------------------------------------------------------
             else if (current_state == S_GENERATOR) begin
-                rx_state <= RX_IDLE;
-                input_error <= 1'b0;
-                case (gen_state)
-                    GEN_IDLE: begin
-                        if (uart_rx_done && uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
-                            gen_rows <= numeric_val[2:0];
-                            gen_state <= GEN_COL;
-                        end
+
+                rx_state <= RX_IDLE; 
+                
+                if (gen_state == GEN_ERROR) 
+                    input_error <= 1'b1;
+                else 
+                    input_error <= 1'b0;
+
+                // 错误复位
+                if (gen_state == GEN_ERROR) begin
+                    if (confirm_signal) begin
+                        gen_state <= GEN_IDLE;
+                        input_error <= 1'b0;
+                        parse_val <= 0; 
+                        parse_valid <= 0;
                     end
-                    GEN_COL: begin
-                        if (uart_rx_done && uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
-                            gen_cols <= numeric_val[2:0];
-                            gen_state <= GEN_COUNT;
+                end
+
+                else begin
+                    if (uart_rx_done) begin
+                        
+                        // === Case A: 数字输入  ===
+                        if (is_digit) begin
+                            if (lookahead_val < 200) begin 
+                                parse_val <= lookahead_val;
+                                parse_valid <= 1'b1;
+                            end
+
+                            if (gen_state == GEN_WAIT_COUNT) begin
+                                // 统计当前同规格矩阵数量
+                                match_count_chk = 0;
+                                for (idx_chk = 0; idx_chk < HARD_MAX_MATRICES; idx_chk = idx_chk + 1) begin
+                                    if (mem_rows[idx_chk] == gen_rows && mem_cols[idx_chk] == gen_cols)
+                                        match_count_chk = match_count_chk + 1;
+                                end
+
+                                if ((match_count_chk + lookahead_val) > max_per_dim) begin
+                                    gen_state <= GEN_ERROR;
+                                    input_error <= 1'b1; 
+                                    parse_val <= 0; 
+                                    parse_valid <= 0;
+                                end
+                            end
                         end
-                    end
-                    GEN_COUNT: begin
-                        if (uart_rx_done && uart_rx_data >= 8'h31 && uart_rx_data <= 8'h32) begin
-                            gen_mat_count_target <= numeric_val[1:0];
-                            gen_mat_idx <= 2'd0;
-                            gen_elem_idx <= 5'd0;
-                            // 调用分配逻辑
-                            find_and_allocate(gen_rows, gen_cols, gen_slot, input_error, is_overwrite_mode);
-                            if (!input_error) 
-                                gen_state <= GEN_WORKING;
-                            else 
-                                gen_state <= GEN_IDLE;
-                        end
-                    end
-                    GEN_WORKING: begin
-                        if (gen_elem_idx < gen_rows * gen_cols) begin
-                            mem_data[gen_slot][gen_elem_idx] <= random_digit;
-                            gen_elem_idx <= gen_elem_idx + 1;
-                        end else begin
-                            mem_rows[gen_slot] <= gen_rows;
-                            mem_cols[gen_slot] <= gen_cols;
-                            
-                            if (!is_overwrite_mode && mat_count < HARD_MAX_MATRICES) 
-                                mat_count <= mat_count + 1;
-                            // 如果需要生成多个
-                            if (gen_mat_idx + 1 < gen_mat_count_target) begin
-                                gen_mat_idx <= gen_mat_idx + 1;
-                                gen_elem_idx <= 0;
-                                // 再次查找分配下一个
-                                find_and_allocate(gen_rows, gen_cols, gen_slot, input_error, is_overwrite_mode);
-                                // 如果此时 input_error 变 1，说明满了，无法继续生成
-                                if (input_error) gen_state <= GEN_DONE;
-                            end else begin
-                                gen_state <= GEN_DONE;
+                        
+                        // === Case B: 分隔符处理 (空格/回车) ===
+                        else if (is_separator) begin
+                            if (parse_valid) begin // 确保缓冲区有数据
+                                case (gen_state)
+                                    GEN_IDLE: begin
+                                        if (parse_val >= 1 && parse_val <= 5) begin
+                                            gen_rows <= parse_val[2:0];
+                                            gen_state <= GEN_WAIT_COL;
+                                        end else begin
+                                            gen_state <= GEN_ERROR;
+                                            input_error <= 1'b1;
+                                        end
+                                        parse_val <= 0; parse_valid <= 0;
+                                    end
+
+                                    GEN_WAIT_COL: begin
+                                        if (parse_val >= 1 && parse_val <= 5) begin
+                                            gen_cols <= parse_val[2:0];
+                                            gen_state <= GEN_WAIT_COUNT;
+                                        end else begin
+                                            gen_state <= GEN_ERROR;
+                                            input_error <= 1'b1;
+                                        end
+                                        parse_val <= 0; parse_valid <= 0;
+                                    end
+
+                                    GEN_WAIT_COUNT: begin
+                                        if (parse_val >= 1 && parse_val <= HARD_MAX_MATRICES) begin
+                                            match_count_chk = 0;
+                                            for (idx_chk = 0; idx_chk < HARD_MAX_MATRICES; idx_chk = idx_chk + 1) begin
+                                                if (mem_rows[idx_chk] == gen_rows && mem_cols[idx_chk] == gen_cols)
+                                                    match_count_chk = match_count_chk + 1;
+                                            end
+                                            
+                                            if ((match_count_chk + parse_val) > max_per_dim) begin
+                                                gen_state <= GEN_ERROR;
+                                                input_error <= 1'b1;
+                                            end else begin
+                                                // 检查通过，开始生成
+                                                gen_mat_count_target <= parse_val[3:0];
+                                                gen_mat_idx <= 0;
+                                                gen_elem_idx <= 0;
+                                                
+                                                find_and_allocate(gen_rows, gen_cols, gen_slot, tmp_error_flag, tmp_overwrite_flag);
+                                                is_overwrite_mode <= tmp_overwrite_flag;
+                                                
+                                                if (!tmp_error_flag) 
+                                                    gen_state <= GEN_WORKING;
+                                                else begin
+                                                    gen_state <= GEN_ERROR;
+                                                    input_error <= 1'b1;
+                                                end
+                                            end
+                                        end else begin
+                                            gen_state <= GEN_ERROR;
+                                            input_error <= 1'b1;
+                                        end
+                                        parse_val <= 0; parse_valid <= 0;
+                                    end
+                                    default: ;
+                                endcase
                             end
                         end
                     end
-                    GEN_DONE: begin
-                        if (confirm_signal) gen_state <= GEN_IDLE;
+                    
+                    // ---------------------------------------------------------
+                    // 4. Confirm 信号处理 
+                    // ---------------------------------------------------------
+                    if (confirm_signal) begin
+                        // 只有在缓冲区有有效数据时才处理
+                        if (parse_valid) begin
+                            case (gen_state)
+                                // 只有在输入数量阶段，Confirm 才是合法的提交信号
+                                GEN_WAIT_COUNT: begin
+                                    if (parse_val >= 1 && parse_val <= HARD_MAX_MATRICES) begin
+                                        // 再次进行容量计算
+                                        match_count_chk = 0;
+                                        for (idx_chk = 0; idx_chk < HARD_MAX_MATRICES; idx_chk = idx_chk + 1) begin
+                                            if (mem_rows[idx_chk] == gen_rows && mem_cols[idx_chk] == gen_cols)
+                                                match_count_chk = match_count_chk + 1;
+                                        end
+                                        
+                                        // 检查是否超标
+                                        if ((match_count_chk + parse_val) > max_per_dim) begin
+                                            gen_state <= GEN_ERROR;
+                                            input_error <= 1'b1;
+                                        end else begin
+                                            // 检查通过，开始生成
+                                            gen_mat_count_target <= parse_val[3:0];
+                                            gen_mat_idx <= 0;
+                                            gen_elem_idx <= 0;
+                                            
+                                            find_and_allocate(gen_rows, gen_cols, gen_slot, tmp_error_flag, tmp_overwrite_flag);
+                                            is_overwrite_mode <= tmp_overwrite_flag;
+                                            
+                                            if (!tmp_error_flag) 
+                                                gen_state <= GEN_WORKING;
+                                            else begin
+                                                gen_state <= GEN_ERROR;
+                                                input_error <= 1'b1;
+                                            end
+                                        end
+                                    end else begin
+                                        // 数量格式错误
+                                        gen_state <= GEN_ERROR;
+                                        input_error <= 1'b1;
+                                    end
+                                end
+
+                                GEN_IDLE: begin
+                                    gen_state <= GEN_ERROR;
+                                    input_error <= 1'b1;
+                                end
+
+                                GEN_WAIT_COL: begin
+                                    gen_state <= GEN_ERROR;
+                                    input_error <= 1'b1;
+                                end
+                                
+                                default: ;
+                            endcase
+                            
+                            // 清空缓冲区
+                            parse_val <= 0;
+                            parse_valid <= 0;
+                        end
                     end
-                endcase
+                    
+                    // ---------------------------------------------------------
+                    // 自动运行的状态 (Working & Done)
+                    // ---------------------------------------------------------
+                    case (gen_state)
+                        GEN_WORKING: begin
+                            if (gen_elem_idx < gen_rows * gen_cols) begin
+                                mem_data[gen_slot][gen_elem_idx] <= random_digit;
+                                gen_elem_idx <= gen_elem_idx + 1;
+                            end else begin
+                                mem_rows[gen_slot] <= gen_rows;
+                                mem_cols[gen_slot] <= gen_cols;
+                                
+                                if (!is_overwrite_mode && mat_count < HARD_MAX_MATRICES) 
+                                    mat_count <= mat_count + 1;
+                                
+                                if (gen_mat_idx + 1 < gen_mat_count_target) begin
+                                    gen_mat_idx <= gen_mat_idx + 1;
+                                    gen_elem_idx <= 0;
+                                    gen_state <= GEN_ALLOC_NEXT; 
+                                end else begin
+                                    gen_state <= GEN_DONE;
+                                end
+                            end
+                        end
+
+                        GEN_ALLOC_NEXT: begin
+                            find_and_allocate(gen_rows, gen_cols, gen_slot, tmp_error_flag, tmp_overwrite_flag);
+                            is_overwrite_mode <= tmp_overwrite_flag;
+
+                            if (!tmp_error_flag) 
+                                gen_state <= GEN_WORKING; 
+                            else begin
+                                gen_state <= GEN_ERROR;
+                                input_error <= 1'b1;
+                            end
+                        end
+                        
+                        GEN_DONE: begin
+                            if (confirm_signal) begin
+                                gen_state <= GEN_IDLE;
+                                parse_val <= 0;
+                            end
+                        end
+                    endcase
+                end
             end
 
             // -----------------------------------------------------------------

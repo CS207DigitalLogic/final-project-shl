@@ -521,7 +521,7 @@ matrix_uart_display #(
     .done           () // 完成信号悬空 (本模块不需要处理完成信号)
 );
 
-// --- B. 矩阵摘要展示模块 (队友的模块) ---
+// --- B. 矩阵摘要展示模块 ---
 // 触发条件: 处于 S_DISPLAYER 状态, 按下 Send 键, 且 sw[1]=1 (摘要模式)
 reg summary_start_pulse;
 always @(posedge clk or negedge rst_n) begin
@@ -557,7 +557,7 @@ matrix_summary_display #(
     .done           () // 完成信号悬空
 );
 
-// --- C. 运算数选择模块 (队友的模块) ---
+// --- C. 运算数选择模块  ---
 // 触发条件: 处于任何运算子状态 (S_OP_*) 且按下 Send 键
 reg selector_start_pulse;
 // 判断当前是否处于运算子状态
