@@ -11,7 +11,7 @@ module integrated_top (
 
     // 拨码开关
     input wire [7:0] sw,         // sw[7:5]=菜单选择, sw[4:3]=设置, sw[2:0]=运算类型
-    input wire [5:0] sw_right,   // [5:2]=标量选择/倒计时选择，[5:3]、[2:0]=矩阵选择
+    input wire [5:0] sw_right,   // [5:2]=标量选择/倒计时选择，[2:0]=矩阵选择
 
     // 按键 (Active High, 需消抖)
     input wire btn_confirm,      // 确认键
@@ -396,8 +396,18 @@ wire [PTR_WIDTH-1:0] summary_read_id;
 wire [PTR_WIDTH-1:0] selector_read_id;
 wire [4:0]           selector_read_addr;
 
-// 计算模块读取请求 ID (前向声明 - 实际信号在后面模块实例化时连接)
-wire [PTR_WIDTH-1:0] calc_read_id_A = {1'b0, operand1_id}; // 物理开关只有3位，高位补零
+// ========== 双运算数选择逻辑 (前向声明) ==========
+// 用于需要两个矩阵的运算（加法、矩阵乘）
+// 注意：这些寄存器在后面的 always 块中赋值
+reg [PTR_WIDTH-1:0] operand_A_id;    // 第一个运算数 ID
+reg [PTR_WIDTH-1:0] operand_B_id;    // 第二个运算数 ID
+reg operand_A_selected;              // 第一个运算数已选择
+reg operand_B_selected;              // 第二个运算数已选择
+
+// 计算模块读取请求 ID
+// 使用选择器选中的 ID，如果没有选择则用拨码开关的值
+wire [PTR_WIDTH-1:0] calc_read_id_A = operand_A_selected ? operand_A_id : {1'b0, operand1_id};
+wire [PTR_WIDTH-1:0] calc_read_id_B = operand_B_selected ? operand_B_id : {1'b0, operand2_id};
 wire [4:0]           calc_read_addr_A_out;  // 来自 matrix_calculator
 wire [4:0]           calc_read_addr_B_out;  // 来自 matrix_calculator
 wire                 calc_busy;             // 来自 matrix_calculator 
@@ -412,9 +422,11 @@ assign mux_read_addr_A = selector_busy ? selector_read_addr :
                          display_busy  ? display_read_addr  :
                          calc_busy     ? calc_read_addr_A_out : 5'd0;
 
+// ID 选择：确保计算模块忙时使用正确的矩阵 ID
 assign mux_read_id_A   = selector_busy ? selector_read_id :
                          summary_busy  ? summary_read_id  :
-                         display_busy  ? display_read_id  : 
+                         display_busy  ? display_read_id  :
+                         calc_busy     ? calc_read_id_A   : 
                          calc_read_id_A;
 
 // --- 端口 B (专供 Calculator)
@@ -447,7 +459,7 @@ matrix_storage_unit #(
     .read_data_A    (read_data_A),   
 
     // Port B (Operand 2)
-    .read_id_B      ({1'b0, operand2_id}),   
+    .read_id_B      (calc_read_id_B),   
     .dim_row_B      (dim_row_B),
     .dim_col_B      (dim_col_B),
     .read_addr_B    (read_addr_B),
@@ -566,6 +578,13 @@ end
 wire selector_error;
 wire [PTR_WIDTH-1:0] selected_operand_id; // 选择器最终选中的矩阵 ID
 
+// selecting_second 标志（在前面的 always 块中使用）
+reg selecting_second;                // 正在选择第二个运算数
+
+// 判断当前运算是否需要两个矩阵
+wire needs_two_operands = (state == S_OP_A) || (state == S_OP_C); // 加法、矩阵乘
+wire needs_one_operand  = (state == S_OP_T) || (state == S_OP_B); // 转置、标量乘
+
 operand_selector #(
     .MAX_MATRICES(MAX_MATRICES),
     .PTR_WIDTH(PTR_WIDTH) // 重要: 使用 4 位
@@ -629,7 +648,6 @@ countdown_unit #(
 //==========================================================================
 // 10. 运算数选择与验证
 //==========================================================================
-reg       operands_valid;
 wire      add_valid, mul_valid;
 wire [2:0] mul_res_row, mul_res_col;
 // 加法验证器
@@ -712,14 +730,50 @@ reg calc_start_pulse;
 reg result_display_start;
 reg calc_active; // 记录是否启动过一次计算
 
+// 判断运算数是否已全部选择完成
+wire operands_ready = needs_one_operand  ? operand_A_selected : 
+                      needs_two_operands ? (operand_A_selected && operand_B_selected) : 1'b0;
+
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         calc_start_pulse <= 1'b0;
         result_display_start <= 1'b0;
         calc_active <= 1'b0;
+        operand_A_id <= 0;
+        operand_B_id <= 0;
+        operand_A_selected <= 1'b0;
+        operand_B_selected <= 1'b0;
+        selecting_second <= 1'b0;
     end else begin
         calc_start_pulse <= 1'b0;      // 形成单周期脉冲
         result_display_start <= 1'b0;  // 形成单周期脉冲
+
+        // 当 operand_selector 完成选择时，保存选中的 ID
+        if (selector_done) begin
+            if (needs_one_operand) begin
+                // 单运算数运算：直接保存到 A
+                operand_A_id <= selected_operand_id;
+                operand_A_selected <= 1'b1;
+            end else if (needs_two_operands) begin
+                // 双运算数运算：先保存 A，再保存 B
+                if (!operand_A_selected) begin
+                    operand_A_id <= selected_operand_id;
+                    operand_A_selected <= 1'b1;
+                    selecting_second <= 1'b1; // 标记需要选第二个
+                end else begin
+                    operand_B_id <= selected_operand_id;
+                    operand_B_selected <= 1'b1;
+                    selecting_second <= 1'b0;
+                end
+            end
+        end
+
+        // 离开运算子状态时，清除所有选择状态
+        if (!in_op_substate) begin
+            operand_A_selected <= 1'b0;
+            operand_B_selected <= 1'b0;
+            selecting_second <= 1'b0;
+        end
 
         // 计算完成且确实启动过计算时，自动显示结果
         // 关键：必须确保 selector 不忙（避免在维度选择时误触发）
@@ -728,17 +782,26 @@ always @(posedge clk or negedge rst_n) begin
             calc_active <= 1'b0; // 本次显示后清除标记
         end
 
+        // 结果显示完成后，清除选择状态以便下次选择
+        if (result_display_done) begin
+            operand_A_selected <= 1'b0;
+            operand_B_selected <= 1'b0;
+        end
+
         // 在运算子状态下按确认键，且其他模块不忙时，检查验证后启动计算
-        // 关键：selector_busy 时不能启动计算
-        if (in_op_substate && confirm_flag && !selector_busy && !display_busy && !summary_busy && !result_display_busy && !calc_busy) begin
+        // 关键修复：只有在运算数已全部选择完成后才能启动计算
+        // selector_busy 时或 operands_ready 为 0 时不能启动计算
+        if (in_op_substate && confirm_flag && operands_ready && !selector_busy && !display_busy && !summary_busy && !result_display_busy && !calc_busy) begin
             case (state)
                 S_OP_T: begin
                     calc_start_pulse <= 1'b1;              // 转置：无需验证
                     calc_active      <= 1'b1;
+                    // 注意：不要在这里清除 operand_A_selected，否则 calc_read_id_A 会变
                 end
                 S_OP_A: if (add_valid) begin
                     calc_start_pulse <= 1'b1;              // 加法：需通过验证
                     calc_active      <= 1'b1;
+                    // 注意：计算期间需要保持 ID 不变
                 end
                 S_OP_B: begin
                     calc_start_pulse <= 1'b1;              // 标量乘：无需验证

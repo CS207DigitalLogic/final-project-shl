@@ -59,20 +59,62 @@ module calc_result_display #(
     //==========================================================================
     localparam S_IDLE        = 4'd0;
     localparam S_SEND_TITLE  = 4'd1;  // 发送 "Result:"
-    localparam S_SEND_DIM    = 4'd2;  // 发送维度 "[rows x cols]"
-    localparam S_SEND_LF     = 4'd3;  // 发送换行
-    localparam S_READ_WAIT   = 4'd4;  // 等待读取数据
-    localparam S_SEND_DATA   = 4'd5;  // 发送数据
-    localparam S_SEND_SPACE  = 4'd6;  // 发送空格
-    localparam S_SEND_NEWLINE = 4'd7; // 发送新行
-    localparam S_DONE        = 4'd8;
+    localparam S_WAIT_TITLE  = 4'd2;  // 等待 UART 发送完成
+    localparam S_SEND_DIM    = 4'd3;  // 发送维度 "[rows x cols]"
+    localparam S_WAIT_DIM    = 4'd4;  // 等待
+    localparam S_SEND_LF     = 4'd5;  // 发送换行
+    localparam S_WAIT_LF     = 4'd6;  // 等待
+    localparam S_READ_WAIT   = 4'd7;  // 等待读取数据
+    localparam S_SEND_DATA   = 4'd8;  // 发送数据
+    localparam S_WAIT_DATA   = 4'd9;  // 等待数据发送
+    localparam S_SEND_SEP    = 4'd10; // 发送空格或换行
+    localparam S_WAIT_SEP    = 4'd11; // 等待分隔符发送
+    localparam S_DONE        = 4'd12;
 
-    reg [3:0] state, state_next;
+    reg [3:0] state;
     reg [2:0] row_idx, col_idx;       // 当前行、列索引
-    reg [2:0] title_idx;              // 标题发送位置
+    reg [3:0] step_idx;               // 步骤索引 (用于发送标题和维度)
     reg [RESULT_WIDTH-1:0] current_data;
-    reg [4:0] data_digit_count;       // 数据的位数
+    reg [2:0] digit_idx;              // 当前发送的数字位置
+    reg [2:0] saved_rows, saved_cols; // 保存的维度
     
+    // 用于多位数显示
+    reg [3:0] digit_count;
+    reg [3:0] digits_0, digits_1, digits_2, digits_3, digits_4;
+    
+    // 数字分解 (组合逻辑)
+    always @(*) begin
+        // 计算位数
+        if (current_data >= 16'd10000) digit_count = 4'd5;
+        else if (current_data >= 16'd1000) digit_count = 4'd4;
+        else if (current_data >= 16'd100) digit_count = 4'd3;
+        else if (current_data >= 16'd10) digit_count = 4'd2;
+        else digit_count = 4'd1;
+        
+        // 分解各位数字
+        digits_0 = current_data % 10;
+        digits_1 = (current_data / 10) % 10;
+        digits_2 = (current_data / 100) % 10;
+        digits_3 = (current_data / 1000) % 10;
+        digits_4 = (current_data / 10000) % 10;
+    end
+    
+    // 获取指定位置的数字 (从高位开始)
+    function [3:0] get_digit;
+        input [2:0] idx;
+        input [3:0] count;
+        begin
+            case (count - 1 - idx)
+                3'd0: get_digit = digits_0;
+                3'd1: get_digit = digits_1;
+                3'd2: get_digit = digits_2;
+                3'd3: get_digit = digits_3;
+                3'd4: get_digit = digits_4;
+                default: get_digit = 4'd0;
+            endcase
+        end
+    endfunction
+
     //==========================================================================
     // 状态机
     //==========================================================================
@@ -82,16 +124,19 @@ module calc_result_display #(
             busy <= 1'b0;
             done <= 1'b0;
             tx_start <= 1'b0;
+            tx_data <= 8'd0;
             result_read_addr <= 5'd0;
             row_idx <= 3'd0;
             col_idx <= 3'd0;
-            title_idx <= 3'd0;
+            step_idx <= 4'd0;
             current_data <= 0;
-            data_digit_count <= 5'd0;
+            digit_idx <= 3'd0;
+            saved_rows <= 3'd0;
+            saved_cols <= 3'd0;
         end else begin
+            // 默认值
             done <= 1'b0;
             tx_start <= 1'b0;
-            state <= state_next;
             
             case (state)
                 //--------------------------------------------------------------
@@ -103,7 +148,9 @@ module calc_result_display #(
                         busy <= 1'b1;
                         row_idx <= 3'd0;
                         col_idx <= 3'd0;
-                        title_idx <= 3'd0;
+                        step_idx <= 4'd0;
+                        saved_rows <= result_rows;
+                        saved_cols <= result_cols;
                         state <= S_SEND_TITLE;
                     end
                 end
@@ -112,24 +159,30 @@ module calc_result_display #(
                 // 发送标题 "Result:"
                 //--------------------------------------------------------------
                 S_SEND_TITLE: begin
-                    tx_start <= 1'b1;
-                    case (title_idx)
-                        3'd0: tx_data <= ASCII_R;
-                        3'd1: tx_data <= ASCII_E;
-                        3'd2: tx_data <= ASCII_S;
-                        3'd3: tx_data <= ASCII_U;
-                        3'd4: tx_data <= ASCII_L;
-                        3'd5: tx_data <= ASCII_T;
-                        3'd6: tx_data <= ASCII_COLON;
-                        default: tx_data <= ASCII_SPACE;
-                    endcase
-                    
                     if (!tx_busy) begin
-                        if (title_idx == 3'd6) begin
-                            title_idx <= 3'd0;
+                        tx_start <= 1'b1;
+                        case (step_idx)
+                            4'd0: tx_data <= ASCII_R;
+                            4'd1: tx_data <= ASCII_E;
+                            4'd2: tx_data <= ASCII_S;
+                            4'd3: tx_data <= ASCII_U;
+                            4'd4: tx_data <= ASCII_L;
+                            4'd5: tx_data <= ASCII_T;
+                            4'd6: tx_data <= ASCII_COLON;
+                            default: tx_data <= ASCII_SPACE;
+                        endcase
+                        state <= S_WAIT_TITLE;
+                    end
+                end
+                
+                S_WAIT_TITLE: begin
+                    if (!tx_busy) begin
+                        if (step_idx == 4'd6) begin
+                            step_idx <= 4'd0;
                             state <= S_SEND_DIM;
                         end else begin
-                            title_idx <= title_idx + 1'b1;
+                            step_idx <= step_idx + 1'b1;
+                            state <= S_SEND_TITLE;
                         end
                     end
                 end
@@ -138,28 +191,28 @@ module calc_result_display #(
                 // 发送维度 "[rows x cols]"
                 //--------------------------------------------------------------
                 S_SEND_DIM: begin
-                    tx_start <= 1'b1;
-                    // 简化处理：直接发送数字表示
-                    if (title_idx == 3'd0) begin
-                        tx_data <= ASCII_LBRK;  // '['
-                    end else if (title_idx == 3'd1) begin
-                        tx_data <= ASCII_0 + result_rows;  // 行数
-                    end else if (title_idx == 3'd2) begin
-                        tx_data <= ASCII_X;  // 'x'
-                    end else if (title_idx == 3'd3) begin
-                        tx_data <= ASCII_0 + result_cols;  // 列数
-                    end else if (title_idx == 3'd4) begin
-                        tx_data <= ASCII_RBRK;  // ']'
-                    end else begin
-                        tx_data <= ASCII_SPACE;
-                    end
-                    
                     if (!tx_busy) begin
-                        if (title_idx == 3'd4) begin
-                            title_idx <= 3'd0;
+                        tx_start <= 1'b1;
+                        case (step_idx)
+                            4'd0: tx_data <= ASCII_LBRK;                    // '['
+                            4'd1: tx_data <= ASCII_0 + {5'd0, saved_rows};  // 行数
+                            4'd2: tx_data <= ASCII_X;                       // 'x'
+                            4'd3: tx_data <= ASCII_0 + {5'd0, saved_cols};  // 列数
+                            4'd4: tx_data <= ASCII_RBRK;                    // ']'
+                            default: tx_data <= ASCII_SPACE;
+                        endcase
+                        state <= S_WAIT_DIM;
+                    end
+                end
+                
+                S_WAIT_DIM: begin
+                    if (!tx_busy) begin
+                        if (step_idx == 4'd4) begin
+                            step_idx <= 4'd0;
                             state <= S_SEND_LF;
                         end else begin
-                            title_idx <= title_idx + 1'b1;
+                            step_idx <= step_idx + 1'b1;
+                            state <= S_SEND_DIM;
                         end
                     end
                 end
@@ -168,24 +221,31 @@ module calc_result_display #(
                 // 发送换行
                 //--------------------------------------------------------------
                 S_SEND_LF: begin
-                    tx_start <= 1'b1;
-                    tx_data <= ASCII_LF;
                     if (!tx_busy) begin
-                        result_read_addr <= row_idx * 5 + col_idx;
-                        state <= S_READ_WAIT;
+                        tx_start <= 1'b1;
+                        tx_data <= ASCII_LF;
+                        state <= S_WAIT_LF;
+                    end
+                end
+                
+                S_WAIT_LF: begin
+                    if (!tx_busy) begin
+                        // 检查是否有数据要发送
+                        if (saved_rows == 0 || saved_cols == 0) begin
+                            state <= S_DONE;
+                        end else begin
+                            result_read_addr <= {2'd0, row_idx} * 5 + {2'd0, col_idx};
+                            state <= S_READ_WAIT;
+                        end
                     end
                 end
                 
                 //--------------------------------------------------------------
-                // 等待读取数据
+                // 等待读取数据 (需要一个周期让数据稳定)
                 //--------------------------------------------------------------
                 S_READ_WAIT: begin
                     current_data <= read_data;
-                    // 计算数据的位数
-                    if (read_data >= 16'd100) data_digit_count <= 5'd3;
-                    else if (read_data >= 16'd10) data_digit_count <= 5'd2;
-                    else data_digit_count <= 5'd1;
-                    
+                    digit_idx <= 3'd0;
                     state <= S_SEND_DATA;
                 end
                 
@@ -193,52 +253,55 @@ module calc_result_display #(
                 // 发送数据
                 //--------------------------------------------------------------
                 S_SEND_DATA: begin
-                    tx_start <= 1'b1;
-                    
-                    // 发送数据的各位数字
-                    if (data_digit_count == 5'd3) begin
-                        tx_data <= ASCII_0 + (current_data / 100);
-                    end else if (data_digit_count == 5'd2) begin
-                        if (current_data >= 16'd100) begin
-                            tx_data <= ASCII_0 + ((current_data / 10) % 10);
-                        end else begin
-                            tx_data <= ASCII_0 + (current_data / 10);
-                        end
-                    end else begin
-                        tx_data <= ASCII_0 + (current_data % 10);
-                    end
-                    
                     if (!tx_busy) begin
-                        if (data_digit_count > 5'd1) begin
-                            data_digit_count <= data_digit_count - 1'b1;
+                        tx_start <= 1'b1;
+                        // 从高位到低位发送
+                        tx_data <= ASCII_0 + {4'd0, get_digit(digit_idx, digit_count)};
+                        state <= S_WAIT_DATA;
+                    end
+                end
+                
+                S_WAIT_DATA: begin
+                    if (!tx_busy) begin
+                        if ({1'b0, digit_idx} + 1 < {1'b0, digit_count}) begin
+                            digit_idx <= digit_idx + 1'b1;
+                            state <= S_SEND_DATA;
                         end else begin
-                            state <= S_SEND_SPACE;
+                            state <= S_SEND_SEP;
                         end
                     end
                 end
                 
                 //--------------------------------------------------------------
-                // 发送空格或换行
+                // 发送分隔符 (空格或换行)
                 //--------------------------------------------------------------
-                S_SEND_SPACE: begin
-                    tx_start <= 1'b1;
-                    
-                    if (col_idx + 1 < result_cols) begin
-                        // 行内：发送空格
-                        tx_data <= ASCII_SPACE;
-                        if (!tx_busy) begin
-                            col_idx <= col_idx + 1'b1;
-                            result_read_addr <= row_idx * 5 + (col_idx + 1);
-                            state <= S_READ_WAIT;
+                S_SEND_SEP: begin
+                    if (!tx_busy) begin
+                        tx_start <= 1'b1;
+                        if (col_idx + 1 < saved_cols) begin
+                            // 行内: 发送空格
+                            tx_data <= ASCII_SPACE;
+                        end else begin
+                            // 行末: 发送换行
+                            tx_data <= ASCII_LF;
                         end
-                    end else begin
-                        // 行末：发送换行
-                        tx_data <= ASCII_LF;
-                        if (!tx_busy) begin
+                        state <= S_WAIT_SEP;
+                    end
+                end
+                
+                S_WAIT_SEP: begin
+                    if (!tx_busy) begin
+                        if (col_idx + 1 < saved_cols) begin
+                            // 同一行继续
+                            col_idx <= col_idx + 1'b1;
+                            result_read_addr <= {2'd0, row_idx} * 5 + ({2'd0, col_idx} + 1);
+                            state <= S_READ_WAIT;
+                        end else begin
+                            // 行结束
                             col_idx <= 3'd0;
-                            if (row_idx + 1 < result_rows) begin
+                            if (row_idx + 1 < saved_rows) begin
                                 row_idx <= row_idx + 1'b1;
-                                result_read_addr <= (row_idx + 1) * 5;
+                                result_read_addr <= ({2'd0, row_idx} + 1) * 5;
                                 state <= S_READ_WAIT;
                             end else begin
                                 state <= S_DONE;
@@ -255,6 +318,8 @@ module calc_result_display #(
                     busy <= 1'b0;
                     state <= S_IDLE;
                 end
+                
+                default: state <= S_IDLE;
             endcase
         end
     end

@@ -47,7 +47,7 @@ module matrix_calculator #(
     
     // 结果读取接口
     input wire [4:0]  result_read_addr,
-    output reg [RESULT_WIDTH-1:0] result_read_data
+    output wire [RESULT_WIDTH-1:0] result_read_data
 );
 
     //==========================================================================
@@ -62,14 +62,15 @@ module matrix_calculator #(
     // 状态机定义
     //==========================================================================
     localparam S_IDLE       = 4'd0;
-    localparam S_INIT       = 4'd1;    // 初始化
-    localparam S_READ_WAIT  = 4'd2;    // 等待读取数据稳定
-    localparam S_CALC       = 4'd3;    // 计算
-    localparam S_MUL_ACC    = 4'd4;    // 矩阵乘累加
-    localparam S_MUL_WRITE  = 4'd5;    // 矩阵乘写结果
-    localparam S_WRITE      = 4'd6;    // 写结果
-    localparam S_NEXT       = 4'd7;    // 下一个元素
-    localparam S_DONE       = 4'd8;    // 完成
+    localparam S_CLEAR      = 4'd1;    // 清零 result_mem
+    localparam S_INIT       = 4'd2;    // 初始化
+    localparam S_READ_WAIT  = 4'd3;    // 等待读取数据稳定
+    localparam S_CALC       = 4'd4;    // 计算
+    localparam S_MUL_ACC    = 4'd5;    // 矩阵乘累加
+    localparam S_MUL_WRITE  = 4'd6;    // 矩阵乘写结果
+    localparam S_WRITE      = 4'd7;    // 写结果
+    localparam S_NEXT       = 4'd8;    // 下一个元素
+    localparam S_DONE       = 4'd9;    // 完成
 
     reg [3:0] state;
     
@@ -95,14 +96,15 @@ module matrix_calculator #(
     
     // 写入地址
     reg [4:0] write_addr;
+    
+    // 清零计数器
+    reg [4:0] clear_idx;
 
     //==========================================================================
-    // 结果读取
+    // 结果读取（组合逻辑，无延迟）
     //==========================================================================
-    always @(posedge clk) begin
-        result_read_data <= result_mem[result_read_addr];
-    end
-
+    assign result_read_data = result_mem[result_read_addr];
+    
     //==========================================================================
     // 主状态机
     //==========================================================================
@@ -127,6 +129,7 @@ module matrix_calculator #(
             write_addr <= 5'd0;
             data_A_reg <= 4'd0;
             data_B_reg <= 4'd0;
+            clear_idx <= 5'd0;
         end else begin
             // 默认值
             done <= 1'b0;
@@ -145,6 +148,20 @@ module matrix_calculator #(
                         j <= 3'd0;
                         k <= 3'd0;
                         accumulator <= 0;
+                        clear_idx <= 5'd0;
+                        state <= S_CLEAR;
+                    end
+                end
+                
+                //--------------------------------------------------------------
+                // 清零状态：逐个清零 result_mem
+                //--------------------------------------------------------------
+                S_CLEAR: begin
+                    result_mem[clear_idx] <= 16'd0;
+                    clear_idx <= clear_idx + 1'b1;
+                    
+                    // 清零完成后进入初始化
+                    if (clear_idx == 5'd24) begin
                         state <= S_INIT;
                     end
                 end
@@ -186,8 +203,9 @@ module matrix_calculator #(
                     
                     // 设置初始读取地址
                     if (saved_opcode == OP_TRANSPOSE) begin
-                        // 转置：读 A[i][j], 写 C[j][i]
-                        read_addr_A <= 5'd0;  // A[0][0]
+                        // 转置：C[i][j] = A[j][i]
+                        // 初始 i=0, j=0, 读 A[0][0]
+                        read_addr_A <= 5'd0;  // j*5 + i = 0*5 + 0 = 0
                     end else if (saved_opcode == OP_MULTIPLY) begin
                         // 矩阵乘：先读 A[0][0] 和 B[0][0]
                         read_addr_A <= 5'd0;  // A[i][k] = A[0][0]
@@ -213,11 +231,12 @@ module matrix_calculator #(
                 S_CALC: begin
                     case (saved_opcode)
                         //--------------------------------------------------
-                        // 转置: C[j][i] = A[i][j]
+                        // 转置: C[i][j] = A[j][i]
+                        // 按结果矩阵坐标遍历，读源矩阵的转置位置
                         //--------------------------------------------------
                         OP_TRANSPOSE: begin
-                            // 计算写入地址：C[j][i] = result[j*5 + i]
-                            write_addr <= j * 5 + i;
+                            // 结果写入 C[i][j]，数据来自 A[j][i]
+                            write_addr <= i * 5 + j;
                             accumulator <= {12'd0, read_data_A};
                             state <= S_WRITE;
                         end
@@ -303,7 +322,8 @@ module matrix_calculator #(
                         // 更新读取地址
                         case (saved_opcode)
                             OP_TRANSPOSE: begin
-                                read_addr_A <= i * 5 + (j + 1);
+                                // 读 A[j+1][i]，因为 C[i][j+1] = A[j+1][i]
+                                read_addr_A <= (j + 1) * 5 + i;
                             end
                             OP_ADD, OP_SCALAR: begin
                                 read_addr_A <= i * 5 + (j + 1);
@@ -323,7 +343,8 @@ module matrix_calculator #(
                         
                         case (saved_opcode)
                             OP_TRANSPOSE: begin
-                                read_addr_A <= (i + 1) * 5 + 0;
+                                // 读 A[0][i+1]，因为 C[i+1][0] = A[0][i+1]
+                                read_addr_A <= 0 * 5 + (i + 1);
                             end
                             OP_ADD, OP_SCALAR: begin
                                 read_addr_A <= (i + 1) * 5 + 0;
