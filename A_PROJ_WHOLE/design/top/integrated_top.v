@@ -349,17 +349,19 @@ wire       result_display_tx_start;
 wire       result_display_busy;
 wire       result_display_done;
 
-// --- UART TX Mux (Priority: ResultDisplay > Selector > Summary > Display) ---
+// --- UART TX Mux (Priority: Convolution > ResultDisplay > Selector > Summary > Display) ---
 wire [7:0] tx_data_mux;
 wire       tx_start_mux;
 wire       tx_busy;
 
-assign tx_data_mux  = result_display_busy ? result_display_tx_data :
+assign tx_data_mux  = conv_busy            ? conv_tx_data            :
+                      result_display_busy ? result_display_tx_data :
                       selector_busy       ? selector_tx_data       :
                       summary_busy        ? summary_tx_data        :
                       display_busy        ? display_tx_data        : 8'd0;
 
-assign tx_start_mux = result_display_busy ? result_display_tx_start :
+assign tx_start_mux = conv_busy            ? conv_tx_start           :
+                      result_display_busy ? result_display_tx_start :
                       selector_busy       ? selector_tx_start       :
                       summary_busy        ? summary_tx_start        :
                       display_busy        ? display_tx_start        : 1'b0;
@@ -707,6 +709,93 @@ always @(posedge clk or negedge rst_n) begin
 end
 
 //==========================================================================
+// 12. 卷积模块 (Convolution - Bonus)
+//==========================================================================
+
+// 卷积控制器信号
+wire [35:0] conv_kernel_packed;
+reg [3:0] conv_kernel_flat [0:8];
+wire conv_start_pulse;
+wire [15:0] conv_pixel_out;
+wire conv_pixel_valid;
+wire conv_done;
+wire conv_busy;
+wire conv_ctrl_done;
+wire [15:0] conv_cycle_count;
+
+// 解包卷积核
+always @(*) begin
+    conv_kernel_flat[0] = conv_kernel_packed[3:0];
+    conv_kernel_flat[1] = conv_kernel_packed[7:4];
+    conv_kernel_flat[2] = conv_kernel_packed[11:8];
+    conv_kernel_flat[3] = conv_kernel_packed[15:12];
+    conv_kernel_flat[4] = conv_kernel_packed[19:16];
+    conv_kernel_flat[5] = conv_kernel_packed[23:20];
+    conv_kernel_flat[6] = conv_kernel_packed[27:24];
+    conv_kernel_flat[7] = conv_kernel_packed[31:28];
+    conv_kernel_flat[8] = conv_kernel_packed[35:32];
+end
+
+// 卷积启动信号：进入S_OP_J状态时启动输入
+reg conv_start_input;
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        conv_start_input <= 1'b0;
+    end else begin
+        conv_start_input <= 1'b0;
+        if (state == S_OP_J && state_next != S_OP_J) begin
+            // 刚进入S_OP_J状态时启动输入
+        end else if (state != S_OP_J && state_next == S_OP_J) begin
+            conv_start_input <= 1'b1;
+        end
+    end
+end
+
+// UART TX多路复用信号（卷积输出）
+wire [7:0] conv_tx_data;
+wire conv_tx_start;
+
+// 卷积控制器实例化
+convolution_controller u_conv_ctrl (
+    .clk            (clk),
+    .rst_n          (rst_n),
+    .start_input    (conv_start_input),
+    .confirm        (confirm_flag),
+    
+    // UART RX
+    .uart_rx_data   (uart_rx_data),
+    .uart_rx_done   (uart_rx_done),
+    
+    // UART TX
+    .tx_data        (conv_tx_data),
+    .tx_start       (conv_tx_start),
+    .tx_busy        (tx_busy),
+    
+    // 卷积核和控制（打包格式）
+    .kernel_flat_packed(conv_kernel_packed),
+    .conv_start     (conv_start_pulse),
+    .conv_pixel_out (conv_pixel_out),
+    .conv_pixel_valid(conv_pixel_valid),
+    .conv_done      (conv_done),
+    
+    // 状态
+    .busy           (conv_busy),
+    .done           (conv_ctrl_done),
+    .cycle_count    (conv_cycle_count)
+);
+
+// 实例化卷积计算模块
+convolution u_convolution (
+    .clk            (clk),
+    .rst_n          (rst_n),
+    .start          (conv_start_pulse),
+    .kernel_flat    (conv_kernel_flat),
+    .pixel_out      (conv_pixel_out),
+    .pixel_valid    (conv_pixel_valid),
+    .done           (conv_done)
+);
+
+//==========================================================================
 // 矩阵计算核心 (来自 part_shl) - matrix_calculator 实例化
 //==========================================================================
 
@@ -893,8 +982,8 @@ calc_result_display #(
 //==========================================================================
 assign led_error = error_flag | storage_input_error | selector_error;
 assign led_idle  = (state == S_MENU);
-assign led_busy  = countdown_active || selector_busy || calc_busy || result_display_busy || (state >= S_OP_T && state <= S_OP_J);
-assign led_done  = calc_done || selector_done || result_display_done;
+assign led_busy  = countdown_active || selector_busy || calc_busy || result_display_busy || conv_busy || (state >= S_OP_T && state <= S_OP_J);
+assign led_done  = calc_done || selector_done || result_display_done || conv_ctrl_done;
 
 // UART work indicators
 always @(*) begin
@@ -1040,24 +1129,59 @@ always @(*) begin
     endcase
 end
 
+// 辅助逻辑：将卷积周期数转换为4位BCD段码（支持0-9999）
+reg [3:0] conv_cycles_digit [0:3]; // 千、百、十、个位
+always @(*) begin
+    conv_cycles_digit[3] = (conv_cycle_count / 1000) % 10;  // 千位
+    conv_cycles_digit[2] = (conv_cycle_count / 100) % 10;   // 百位
+    conv_cycles_digit[1] = (conv_cycle_count / 10) % 10;    // 十位
+    conv_cycles_digit[0] = conv_cycle_count % 10;           // 个位
+end
+
+// 将数字转换为段码的函数
+function [7:0] digit_to_seg;
+    input [3:0] digit;
+    begin
+        case (digit)
+            4'd0: digit_to_seg = SEG_0;
+            4'd1: digit_to_seg = SEG_1;
+            4'd2: digit_to_seg = SEG_2;
+            4'd3: digit_to_seg = SEG_3;
+            4'd4: digit_to_seg = SEG_4;
+            4'd5: digit_to_seg = SEG_5;
+            4'd6: digit_to_seg = SEG_6;
+            4'd7: digit_to_seg = SEG_7;
+            4'd8: digit_to_seg = SEG_8;
+            4'd9: digit_to_seg = SEG_9;
+            default: digit_to_seg = SEG_BLANK;
+        endcase
+    end
+endfunction
+
 // dk7/dk8 赋值逻辑
 always @(*) begin
     dk7_value = SEG_BLANK;
     dk8_value = SEG_BLANK;
 
-    // 当处于 Operator 模式且可能触发错误时（或简单地只要倒计时不为0）显示
-    // 这里依据你的描述：运算数不符合要求 -> 开启输入倒计时
-    // 如果你有专门的 'S_ERROR' 状态，可以加进 if 里
-    // 下面的逻辑是：只要处于 Operator 相关状态，就把当前的倒计时数值显示在 dk8 上
-    if (state == S_OPERATOR || state == S_OP_T || state == S_OP_A || 
+    // 优先级1: 卷积完成后显示周期数（DK7=百位+十位, DK8=个位，简化显示）
+    if (state == S_OP_J && conv_ctrl_done) begin
+        // 显示后3位数字（最多999）
+        if (conv_cycle_count < 100) begin
+            dk7_value = digit_to_seg(conv_cycles_digit[1]); // 十位
+            dk8_value = digit_to_seg(conv_cycles_digit[0]); // 个位
+        end else begin
+            dk7_value = digit_to_seg(conv_cycles_digit[2]); // 百位
+            dk8_value = digit_to_seg(conv_cycles_digit[1]); // 十位（简化，只显示2位）
+        end
+    end
+    // 优先级2: 当处于 Operator 模式且可能触发错误时显示倒计时
+    else if (state == S_OPERATOR || state == S_OP_T || state == S_OP_A || 
         state == S_OP_B || state == S_OP_C || state == S_OP_J) begin
         
         dk8_value = countdown_seg; // 个位显示在最右侧 dk8
         dk7_value = SEG_BLANK;     // 十位保持黑屏 (如果倒计时大于9需要修改此处)
     end
-
-    //优先级 2: 矩阵数量设置显示
-    // 当处于 S_SE_n
+    // 优先级3: 矩阵数量设置显示
     else if (state == S_SE_n) begin
         dk7_value = limit_seg;    
         dk8_value = SEG_BLANK;    
