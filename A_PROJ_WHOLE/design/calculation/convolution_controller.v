@@ -77,8 +77,9 @@ module convolution_controller(
     // UART发送控制
     //==========================================================================
     reg [6:0] send_index;    // 发送索引
-    reg [2:0] send_stage;    // 发送阶段（多字节数据）
+    reg [3:0] send_stage;    // 发送阶段（多字节数据）- 扩展到4位
     reg [3:0] tx_delay;      // 发送延迟计数器
+    reg cycles_sent;         // 周期数已发送标志
     
     //==========================================================================
     // 时钟周期计数器
@@ -134,7 +135,7 @@ module convolution_controller(
             end
             
             S_SEND_CYCLES: begin
-                if (send_stage == 3 && !tx_busy && tx_delay == 0) 
+                if (cycles_sent) 
                     state_next = S_DONE;
             end
             
@@ -150,9 +151,16 @@ module convolution_controller(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             kernel_input_count <= 0;
-            for (integer i = 0; i < 9; i = i + 1) begin
-                kernel_flat[i] <= 4'd0;
-            end
+            // 手动展开初始化，避免for循环
+            kernel_flat[0] <= 4'd0;
+            kernel_flat[1] <= 4'd0;
+            kernel_flat[2] <= 4'd0;
+            kernel_flat[3] <= 4'd0;
+            kernel_flat[4] <= 4'd0;
+            kernel_flat[5] <= 4'd0;
+            kernel_flat[6] <= 4'd0;
+            kernel_flat[7] <= 4'd0;
+            kernel_flat[8] <= 4'd0;
         end else begin
             case (state)
                 S_IDLE: begin
@@ -163,9 +171,18 @@ module convolution_controller(
                 
                 S_INPUT_KERNEL: begin
                     if (uart_rx_done && kernel_input_count < 9) begin
-                        // 接收一个字节，转换为4位（取低4位）
-                        kernel_flat[kernel_input_count] <= uart_rx_data[3:0];
-                        kernel_input_count <= kernel_input_count + 1;
+                        // 接收一个字节，支持十进制ASCII (0-9)
+                        // ASCII '0'=0x30 到 '9'=0x39
+                        if (uart_rx_data >= 8'h30 && uart_rx_data <= 8'h39) begin
+                            kernel_flat[kernel_input_count] <= uart_rx_data - 8'h30;
+                            kernel_input_count <= kernel_input_count + 1;
+                        end
+                        // 也支持直接十六进制输入（兼容模式）
+                        else if (uart_rx_data <= 8'h09) begin
+                            kernel_flat[kernel_input_count] <= uart_rx_data[3:0];
+                            kernel_input_count <= kernel_input_count + 1;
+                        end
+                        // 忽略空格、换行等分隔符
                     end
                 end
             endcase
@@ -185,6 +202,11 @@ module convolution_controller(
             conv_start <= 1'b0;
             
             case (state)
+                S_IDLE: begin
+                    cycle_counter <= 0;
+                    cycle_count <= 0;
+                end
+                
                 S_START_CONV: begin
                     conv_start <= 1'b1;
                     cycle_counter <= 0;
@@ -193,11 +215,12 @@ module convolution_controller(
                 
                 S_COUNTING: begin
                     if (counting_active) begin
-                        cycle_counter <= cycle_counter + 1;
-                    end
-                    if (conv_done) begin
-                        counting_active <= 1'b0;
-                        cycle_count <= cycle_counter;
+                        if (conv_done) begin
+                            counting_active <= 1'b0;
+                            cycle_count <= cycle_counter;  // 捕获当前值
+                        end else begin
+                            cycle_counter <= cycle_counter + 1;
+                        end
                     end
                 end
             endcase
@@ -245,6 +268,7 @@ module convolution_controller(
             send_index <= 0;
             send_stage <= 0;
             tx_delay <= 0;
+            cycles_sent <= 1'b0;
         end else begin
             tx_start <= 1'b0;
             
@@ -253,6 +277,10 @@ module convolution_controller(
             end
             
             case (state)
+                S_IDLE: begin
+                    cycles_sent <= 1'b0;  // 重置标志
+                end
+                
                 S_SEND_HEADER: begin
                     if (!tx_busy && tx_delay == 0) begin
                         tx_data <= 8'h0A;  // 换行
@@ -265,22 +293,29 @@ module convolution_controller(
                 
                 S_SEND_RESULT: begin
                     if (!tx_busy && tx_delay == 0 && send_index < 80) begin
-                        // 发送每个结果的ASCII表示
-                        // 格式: 3位十进制数 + 空格
+                        // 发送每个结果的ASCII表示，按实际位数输出
                         case (send_stage)
-                            0: begin  // 百位
-                                tx_data <= 8'h30 + (result_buffer[send_index] / 100);
-                                tx_start <= 1'b1;
-                                tx_delay <= 4'd5;
-                                send_stage <= 1;
+                            0: begin  // 判断并发送百位（如果>=100）
+                                if (result_buffer[send_index] >= 100) begin
+                                    tx_data <= 8'h30 + (result_buffer[send_index] / 100);
+                                    tx_start <= 1'b1;
+                                    tx_delay <= 4'd5;
+                                    send_stage <= 1;
+                                end else begin
+                                    send_stage <= 1;  // 跳过百位
+                                end
                             end
-                            1: begin  // 十位
-                                tx_data <= 8'h30 + ((result_buffer[send_index] / 10) % 10);
-                                tx_start <= 1'b1;
-                                tx_delay <= 4'd5;
-                                send_stage <= 2;
+                            1: begin  // 判断并发送十位（如果>=10）
+                                if (result_buffer[send_index] >= 10) begin
+                                    tx_data <= 8'h30 + ((result_buffer[send_index] / 10) % 10);
+                                    tx_start <= 1'b1;
+                                    tx_delay <= 4'd5;
+                                    send_stage <= 2;
+                                end else begin
+                                    send_stage <= 2;  // 跳过十位
+                                end
                             end
-                            2: begin  // 个位
+                            2: begin  // 个位（总是发送）
                                 tx_data <= 8'h30 + (result_buffer[send_index] % 10);
                                 tx_start <= 1'b1;
                                 tx_delay <= 4'd5;
@@ -301,31 +336,82 @@ module convolution_controller(
                 end
                 
                 S_SEND_CYCLES: begin
-                    if (!tx_busy && tx_delay == 0) begin
+                    if (!tx_busy && tx_delay == 0 && !cycles_sent) begin
                         case (send_stage)
-                            0: begin  // 发送 "Cycles: "
+                            4'd0: begin  // 发送 "C:"
                                 tx_data <= 8'h43;  // 'C'
                                 tx_start <= 1'b1;
                                 tx_delay <= 4'd5;
-                                send_stage <= 1;
+                                send_stage <= 4'd1;
                             end
-                            1: begin
+                            4'd1: begin
                                 tx_data <= 8'h3A;  // ':'
                                 tx_start <= 1'b1;
                                 tx_delay <= 4'd5;
-                                send_stage <= 2;
+                                send_stage <= 4'd2;
                             end
-                            2: begin
+                            4'd2: begin
                                 tx_data <= 8'h20;  // ' '
                                 tx_start <= 1'b1;
                                 tx_delay <= 4'd5;
-                                send_stage <= 3;
+                                send_stage <= 4'd3;
                             end
-                            default: begin
-                                send_stage <= 3;
+                            4'd3: begin  // 发送周期数（简化：直接发送十进制）
+                                // 万位
+                                if (cycle_count >= 10000) begin
+                                    tx_data <= 8'h30 + ((cycle_count / 10000) % 10);
+                                    tx_start <= 1'b1;
+                                    tx_delay <= 4'd5;
+                                end
+                                send_stage <= 4'd4;
+                            end
+                            4'd4: begin  // 千位
+                                if (cycle_count >= 1000) begin
+                                    tx_data <= 8'h30 + ((cycle_count / 1000) % 10);
+                                    tx_start <= 1'b1;
+                                    tx_delay <= 4'd5;
+                                end
+                                send_stage <= 4'd5;
+                            end
+                            4'd5: begin  // 百位
+                                if (cycle_count >= 100) begin
+                                    tx_data <= 8'h30 + ((cycle_count / 100) % 10);
+                                    tx_start <= 1'b1;
+                                    tx_delay <= 4'd5;
+                                end
+                                send_stage <= 4'd6;
+                            end
+                            4'd6: begin  // 十位
+                                if (cycle_count >= 10) begin
+                                    tx_data <= 8'h30 + ((cycle_count / 10) % 10);
+                                    tx_start <= 1'b1;
+                                    tx_delay <= 4'd5;
+                                end
+                                send_stage <= 4'd7;
+                            end
+                            4'd7: begin  // 个位（总是发送）
+                                tx_data <= 8'h30 + (cycle_count % 10);
+                                tx_start <= 1'b1;
+                                tx_delay <= 4'd5;
+                                send_stage <= 4'd8;
+                            end
+                            4'd8: begin  // 发送换行
+                                tx_data <= 8'h0A;  // '\n'
+                                tx_start <= 1'b1;
+                                tx_delay <= 4'd5;
+                                send_stage <= 4'd9;
+                            end
+                            4'd9: begin
+                                // 标记完成，不再发送
+                                cycles_sent <= 1'b1;
                             end
                         endcase
                     end
+                end
+                
+                S_DONE: begin
+                    // 在DONE状态重置send_stage，为下次做准备
+                    send_stage <= 0;
                 end
             endcase
         end

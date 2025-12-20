@@ -127,6 +127,14 @@ set_property IOSTANDARD LVCMOS33 [get_ports {seg1[*]}]
 
 ## Digit Enable for DK5-DK8 
 
+# DK5
+set_property PACKAGE_PIN G1 [get_ports dk5_en]
+set_property IOSTANDARD LVCMOS33 [get_ports dk5_en]
+
+# DK6
+set_property PACKAGE_PIN F1 [get_ports dk6_en]
+set_property IOSTANDARD LVCMOS33 [get_ports dk6_en]
+
 # DK7
 set_property PACKAGE_PIN E1 [get_ports dk7_en]
 set_property IOSTANDARD LVCMOS33 [get_ports dk7_en]

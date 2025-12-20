@@ -3,9 +3,9 @@ module convolution(
     input wire rst_n,
     input wire start,
     
-    // 用户输入的卷积核 (3x3 = 9个元素，打平输入)
-    // kernel[0]对应(0,0), kernel[1]对应(0,1)... kernel[8]对应(2,2)
-    input wire [3:0] kernel_flat [0:8], 
+    // 用户输入的卷积核 (3x3 = 9个元素，打包为36位)
+    // [3:0]对应(0,0), [7:4]对应(0,1)... [35:32]对应(2,2)
+    input wire [35:0] kernel_flat_packed, 
     
     // 结果输出流 (串行输出，每次算完一个点吐出来)
     output reg [15:0] pixel_out,  // 卷积结果 (累加值可能会大，用16位安全)
@@ -16,6 +16,18 @@ module convolution(
     // =========================================================
     // 1. 内部变量与计数器
     // =========================================================
+    
+    // 解包卷积核到内部数组
+    wire [3:0] kernel_flat [0:8];
+    assign kernel_flat[0] = kernel_flat_packed[3:0];
+    assign kernel_flat[1] = kernel_flat_packed[7:4];
+    assign kernel_flat[2] = kernel_flat_packed[11:8];
+    assign kernel_flat[3] = kernel_flat_packed[15:12];
+    assign kernel_flat[4] = kernel_flat_packed[19:16];
+    assign kernel_flat[5] = kernel_flat_packed[23:20];
+    assign kernel_flat[6] = kernel_flat_packed[27:24];
+    assign kernel_flat[7] = kernel_flat_packed[31:28];
+    assign kernel_flat[8] = kernel_flat_packed[35:32];
     
     // 输出图像坐标 (8行 10列)
     reg [3:0] out_row; // 0~7
@@ -44,9 +56,10 @@ module convolution(
     // 状态机定义
     localparam IDLE = 3'd0;
     localparam SET_ADDR = 3'd1; // 设置读取地址
-    localparam CALC = 3'd2;     // 读取数据并累加
-    localparam OUTPUT = 3'd3;   // 输出一个像素的结果
-    localparam FINISH = 3'd4;   // 全部结束
+    localparam WAIT_ROM = 3'd2; // 等待ROM数据
+    localparam CALC = 3'd3;     // 读取数据并累加
+    localparam OUTPUT = 3'd4;   // 输出一个像素的结果
+    localparam FINISH = 3'd5;   // 全部结束
 
     reg [2:0] state;
 
@@ -82,11 +95,17 @@ module convolution(
                     rom_addr_x <= out_row + k_row;
                     rom_addr_y <= out_col + k_col;
                     
-                    // ROM读取有延迟，下一拍数据才出来，所以跳到CALC状态
-                    state <= CALC; 
+                    // ROM读取有延迟，需要等待一个周期
+                    state <= WAIT_ROM; 
+                end
+                
+                // --- 步骤2: 等待ROM数据准备好 ---
+                WAIT_ROM: begin
+                    // 这个周期ROM数据已经准备好了
+                    state <= CALC;
                 end
 
-                // --- 步骤2: 拿到数据，乘法累加 ---
+                // --- 步骤3: 拿到数据，乘法累加 ---
                 CALC: begin
                     // 核心计算: 累加器 += 图像数据 * 卷积核对应系数
                     // kernel_flat 索引 = k_row * 3 + k_col
@@ -108,7 +127,7 @@ module convolution(
                     end
                 end
 
-                // --- 步骤3: 输出一个像素 ---
+                // --- 步骤4: 输出一个像素 ---
                 OUTPUT: begin
                     pixel_out <= accumulator; // 输出累加结果
                     pixel_valid <= 1;         // 告诉外面结果有效
@@ -132,7 +151,7 @@ module convolution(
                     end
                 end
 
-                // --- 步骤4: 完成 ---
+                // --- 步骤5: 完成 ---
                 FINISH: begin
                     pixel_valid <= 0;
                     done <= 1;
