@@ -314,6 +314,31 @@ always @(posedge clk or negedge rst_n) begin
 end
 
 //==========================================================================
+// S_SE_c: 倒计时秒数配置
+//==========================================================================
+// 真正供给系统的倒计时设置值 (寄存器)
+reg [3:0] setting_countdown_seconds;
+
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        // 复位时的默认值10秒
+        setting_countdown_seconds <= 4'd10;
+    end else begin
+        // 只有在 "S_SE_c" 状态下，且按下 Confirm 时，才更新值
+        if (state == S_SE_c && confirm_flag) begin
+            // 安全检查：限制在5~15秒范围内
+            if (count_down_input >= 4'd5 && count_down_input <= 4'd15) begin
+                setting_countdown_seconds <= count_down_input;
+            end else if (count_down_input < 4'd5) begin
+                setting_countdown_seconds <= 4'd5; // 最小5秒
+            end else begin
+                setting_countdown_seconds <= 4'd15; // 最大15秒
+            end
+        end
+    end
+end
+
+//==========================================================================
 // 6. UART 模块 (来自 part_lyx)
 //==========================================================================
 
@@ -642,7 +667,7 @@ countdown_unit #(
     .rst_n          (rst_n),
     
     .start          (start_countdown), // 输入：启动脉冲
-    .setting_in     (count_down_input),// 输入：来自开关的设置值
+    .setting_in     (setting_countdown_seconds), // 修改：使用配置后的值而非开关直接输入
     
     .current_seconds(countdown_seconds),// 输出：给 DK7/DK8 显示
     .active         (countdown_active), // 输出：给 LED Busy
@@ -677,41 +702,138 @@ multiplexer_validator u_mul_val (
 // 11. 倒计时触发控制
 //==========================================================================
 
+// 运算数选择状态追踪
+reg waiting_for_reselection;      // 等待重新选择运算数的标志
+reg reselection_in_progress;      // 正在重选过程中（倒计时期间）
+
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         start_countdown <= 1'b0;
-        error_flag   <= 1'b0; // 复位内部标志
+        error_flag <= 1'b0;
+        waiting_for_reselection <= 1'b0;
+        reselection_in_progress <= 1'b0;
     end else begin
-        start_countdown <= 1'b0;
+        start_countdown <= 1'b0;  // 默认不启动，形成单周期脉冲
         
-        // 当倒计时结束或返回菜单时，清除运算错误标志
-        if (countdown_timeout || state == S_MENU) begin
+        //----------------------------------------------------------------------
+        // 情况1：倒计时超时处理
+        //----------------------------------------------------------------------
+        if (countdown_timeout) begin
+            // 倒计时到期：清除错误标志，重置重选状态
             error_flag <= 1'b0;
+            
+            if (waiting_for_reselection || reselection_in_progress) begin
+                // 超时未完成重选，需要回到运算数选择起始阶段
+                waiting_for_reselection <= 1'b0;
+                reselection_in_progress <= 1'b0;
+                // operand_A/B_selected 的清除在下面的 always 块中处理
+            end
         end
         
-        if (confirm_flag) begin
+        //----------------------------------------------------------------------
+        // 情况2：离开运算子状态时，清除所有标志
+        //----------------------------------------------------------------------
+        if (state == S_MENU || !in_op_substate) begin
+            error_flag <= 1'b0;
+            waiting_for_reselection <= 1'b0;
+            reselection_in_progress <= 1'b0;
+        end
+        
+        //----------------------------------------------------------------------
+        // 情况3：倒计时期间的重选完成检测
+        //----------------------------------------------------------------------
+        if (countdown_active && reselection_in_progress) begin
+            // 如果在倒计时期间，两个运算数都已重新选择完成
+            if (needs_two_operands && operand_A_selected && operand_B_selected) begin
+                // 重选完成，检查新运算数是否合法
+                case (state)
+                    S_OP_A: begin
+                        if (add_valid) begin
+                            // 新运算数合法：清除错误，停止倒计时相关标志
+                            error_flag <= 1'b0;
+                            reselection_in_progress <= 1'b0;
+                            waiting_for_reselection <= 1'b0;
+                            // 注意：倒计时模块会自行结束，这里不需要手动停止
+                        end
+                        // 如果不合法，继续等待或等倒计时结束
+                    end
+                    S_OP_C: begin
+                        if (mul_valid) begin
+                            error_flag <= 1'b0;
+                            reselection_in_progress <= 1'b0;
+                            waiting_for_reselection <= 1'b0;
+                        end
+                    end
+                    default: ;
+                endcase
+            end
+        end
+        
+        //----------------------------------------------------------------------
+        // 情况4：按下确认键时的验证逻辑
+        //----------------------------------------------------------------------
+        if (confirm_flag && in_op_substate && !countdown_active) begin
+            // 只有在倒计时未激活时才进行首次验证
             case (state)
                 S_OP_A: begin
-                    if (!add_valid) begin
-                        start_countdown <= 1'b1;
-                        error_flag   <= 1'b1; // 记录运算错误
+                    // 加法：需要两个运算数都已选择
+                    if (operand_A_selected && operand_B_selected) begin
+                        if (!add_valid) begin
+                            // 运算数不合法：启动倒计时，进入重选模式
+                            start_countdown <= 1'b1;
+                            error_flag <= 1'b1;
+                            waiting_for_reselection <= 1'b1;
+                            reselection_in_progress <= 1'b1;
+                        end
                     end
                 end
                 
                 S_OP_C: begin
-                    if (!mul_valid) begin
-                        start_countdown <= 1'b1;
-                        error_flag   <= 1'b1; // 记录运算错误
+                    // 矩阵乘：需要 A的列数 = B的行数
+                    if (operand_A_selected && operand_B_selected) begin
+                        if (!mul_valid) begin
+                            start_countdown <= 1'b1;
+                            error_flag <= 1'b1;
+                            waiting_for_reselection <= 1'b1;
+                            reselection_in_progress <= 1'b1;
+                        end
                     end
                 end
-                default: ; 
+                
+                default: ;
             endcase
+        end
+        
+        //----------------------------------------------------------------------
+        // 情况5：倒计时期间按确认键重新验证
+        //----------------------------------------------------------------------
+        if (confirm_flag && in_op_substate && countdown_active && reselection_in_progress) begin
+            if (needs_two_operands && operand_A_selected && operand_B_selected) begin
+                case (state)
+                    S_OP_A: begin
+                        if (!add_valid) begin
+                            // 新运算数仍然不合法：重新启动倒计时
+                            start_countdown <= 1'b1;
+                            error_flag <= 1'b1;
+                            // 清除选择状态，要求重新开始选择
+                        end
+                        // 合法情况在"情况3"中处理
+                    end
+                    S_OP_C: begin
+                        if (!mul_valid) begin
+                            start_countdown <= 1'b1;
+                            error_flag <= 1'b1;
+                        end
+                    end
+                    default: ;
+                endcase
+            end
         end
     end
 end
 
 //==========================================================================
-// 矩阵计算核心 (来自 part_shl) - matrix_calculator 实例化
+// 矩阵计算核心 - 运算数选择逻辑（完善版）
 //==========================================================================
 
 // 操作码推导（根据当前状态自动生成）
@@ -749,22 +871,26 @@ always @(posedge clk or negedge rst_n) begin
         operand_B_selected <= 1'b0;
         selecting_second <= 1'b0;
     end else begin
-        calc_start_pulse <= 1'b0;      // 形成单周期脉冲
-        result_display_start <= 1'b0;  // 形成单周期脉冲
+        calc_start_pulse <= 1'b0;
+        result_display_start <= 1'b0;
 
-        // 当 operand_selector 完成选择时，保存选中的 ID
+        //----------------------------------------------------------------------
+        // 运算数选择器完成选择时的处理
+        //----------------------------------------------------------------------
         if (selector_done) begin
             if (needs_one_operand) begin
                 // 单运算数运算：直接保存到 A
                 operand_A_id <= selected_operand_id;
                 operand_A_selected <= 1'b1;
             end else if (needs_two_operands) begin
-                // 双运算数运算：先保存 A，再保存 B
+                // 双运算数运算
                 if (!operand_A_selected) begin
+                    // 第一个运算数
                     operand_A_id <= selected_operand_id;
                     operand_A_selected <= 1'b1;
-                    selecting_second <= 1'b1; // 标记需要选第二个
+                    selecting_second <= 1'b1;
                 end else begin
+                    // 第二个运算数
                     operand_B_id <= selected_operand_id;
                     operand_B_selected <= 1'b1;
                     selecting_second <= 1'b0;
@@ -772,54 +898,92 @@ always @(posedge clk or negedge rst_n) begin
             end
         end
 
-        // 离开运算子状态时，清除所有选择状态
+        //----------------------------------------------------------------------
+        // 倒计时超时时：清除运算数选择状态，强制重新选择
+        //----------------------------------------------------------------------
+        if (countdown_timeout && (waiting_for_reselection || reselection_in_progress)) begin
+            operand_A_selected <= 1'b0;
+            operand_B_selected <= 1'b0;
+            selecting_second <= 1'b0;
+        end
+        
+        //----------------------------------------------------------------------
+        // 进入重选模式时：立即清除选择状态以便重选
+        //----------------------------------------------------------------------
+        else if (start_countdown && (state == S_OP_A || state == S_OP_C)) begin
+            // 刚启动倒计时时清除选择状态（下一个时钟周期生效）
+            operand_A_selected <= 1'b0;
+            operand_B_selected <= 1'b0;
+            selecting_second <= 1'b0;
+        end
+
+        //----------------------------------------------------------------------
+        // 离开运算子状态时：清除所有选择状态
+        //----------------------------------------------------------------------
         if (!in_op_substate) begin
             operand_A_selected <= 1'b0;
             operand_B_selected <= 1'b0;
             selecting_second <= 1'b0;
         end
 
-        // 计算完成且确实启动过计算时，自动显示结果
-        // 关键：必须确保 selector 不忙（避免在维度选择时误触发）
-        if (calc_active && calc_done && in_op_substate && !result_display_busy && !selector_busy) begin
+        //----------------------------------------------------------------------
+        // 计算完成后自动显示结果
+        //----------------------------------------------------------------------
+        if (calc_active && calc_done && in_op_substate && 
+            !result_display_busy && !selector_busy) begin
             result_display_start <= 1'b1;
-            calc_active <= 1'b0; // 本次显示后清除标记
+            calc_active <= 1'b0;
         end
 
-        // 结果显示完成后，清除选择状态以便下次选择
+        //----------------------------------------------------------------------
+        // 结果显示完成后：清除选择状态以便下次选择
+        //----------------------------------------------------------------------
         if (result_display_done) begin
             operand_A_selected <= 1'b0;
             operand_B_selected <= 1'b0;
         end
 
-        // 在运算子状态下按确认键，且其他模块不忙时，检查验证后启动计算
-        // 关键修复：只有在运算数已全部选择完成后才能启动计算
-        // selector_busy 时或 operands_ready 为 0 时不能启动计算
-        if (in_op_substate && confirm_flag && operands_ready && !selector_busy && !display_busy && !summary_busy && !result_display_busy && !calc_busy) begin
+        //----------------------------------------------------------------------
+        // 启动计算的条件
+        //----------------------------------------------------------------------
+        // 条件：在运算子状态 + 按确认 + 运算数就绪 + 不在重选模式 + 各模块空闲
+        if (in_op_substate && confirm_flag && operands_ready && 
+            !waiting_for_reselection && !reselection_in_progress &&
+            !countdown_active &&  // 新增：倒计时未激活
+            !selector_busy && !display_busy && 
+            !summary_busy && !result_display_busy && !calc_busy) begin
             case (state)
                 S_OP_T: begin
-                    calc_start_pulse <= 1'b1;              // 转置：无需验证
-                    calc_active      <= 1'b1;
-                    // 注意：不要在这里清除 operand_A_selected，否则 calc_read_id_A 会变
+                    // 转置：无需验证
+                    calc_start_pulse <= 1'b1;
+                    calc_active <= 1'b1;
                 end
-                S_OP_A: if (add_valid) begin
-                    calc_start_pulse <= 1'b1;              // 加法：需通过验证
-                    calc_active      <= 1'b1;
-                    // 注意：计算期间需要保持 ID 不变
+                S_OP_A: begin
+                    // 加法：需通过验证
+                    if (add_valid) begin
+                        calc_start_pulse <= 1'b1;
+                        calc_active <= 1'b1;
+                    end
                 end
                 S_OP_B: begin
-                    calc_start_pulse <= 1'b1;              // 标量乘：无需验证
-                    calc_active      <= 1'b1;
+                    // 标量乘：无需验证
+                    calc_start_pulse <= 1'b1;
+                    calc_active <= 1'b1;
                 end
-                S_OP_C: if (mul_valid) begin
-                    calc_start_pulse <= 1'b1;              // 矩阵乘：需通过验证
-                    calc_active      <= 1'b1;
+                S_OP_C: begin
+                    // 矩阵乘：需通过验证
+                    if (mul_valid) begin
+                        calc_start_pulse <= 1'b1;
+                        calc_active <= 1'b1;
+                    end
                 end
                 default: ;
             endcase
         end
 
+        //----------------------------------------------------------------------
         // 离开运算子状态时清除 calc_active
+        //----------------------------------------------------------------------
         if (!in_op_substate) begin
             calc_active <= 1'b0;
         end
@@ -1022,17 +1186,20 @@ always @(*) begin
     endcase
 end
 
-// 辅助逻辑：将矩阵数量转换为段码
+// 辅助逻辑：将矩阵数量转换为段码（S_SE_n 状态用）
 reg [7:0] limit_seg;
-reg [2:0] limit_num_to_show; // 暂存要显示的数字
+reg [2:0] limit_num_to_show;
 always @(*) begin
+    // 选择要显示的值：S_SE_n 状态显示预览值，否则显示当前设置值
     if (state == S_SE_n) begin
-        // 如果在S_SE_n，显示开关的实时预览值
-        limit_num_to_show = {1'b0, matrix_limit_input_preview}; 
+        limit_num_to_show = matrix_limit_input_preview;
     end else begin
-        limit_num_to_show = setting_max_per_dim; 
+        limit_num_to_show = setting_max_per_dim;
     end
+    
+    // 将数值转换为段码
     case (limit_num_to_show)
+        3'd0: limit_seg = SEG_0;
         3'd1: limit_seg = SEG_1;
         3'd2: limit_seg = SEG_2;
         3'd3: limit_seg = SEG_3;
@@ -1044,26 +1211,103 @@ always @(*) begin
     endcase
 end
 
+// 倒计时配置预览值转换（用于 S_SE_c 状态）
+reg [7:0] countdown_preview_tens, countdown_preview_ones;
+reg [3:0] countdown_preview_value;
+
+always @(*) begin
+    // 选择要显示的倒计时值
+    if (state == S_SE_c) begin
+        // 在配置状态下，显示开关的实时预览值（限制在5~15范围内）
+        if (count_down_input >= 4'd5 && count_down_input <= 4'd15) begin
+            countdown_preview_value = count_down_input;
+        end else if (count_down_input < 4'd5) begin
+            countdown_preview_value = 4'd5;
+        end else begin
+            countdown_preview_value = 4'd15;
+        end
+    end else begin
+        // 非配置状态下，使用当前配置值
+        countdown_preview_value = setting_countdown_seconds;
+    end
+    
+    // 计算十位段码
+    if (countdown_preview_value >= 4'd10) begin
+        countdown_preview_tens = SEG_1;  // 10-15 时十位显示 1
+    end else begin
+        countdown_preview_tens = SEG_BLANK;  // 5-9 时十位不显示
+    end
+    
+    // 计算个位段码
+    case (countdown_preview_value % 10)
+        4'd0: countdown_preview_ones = SEG_0;
+        4'd1: countdown_preview_ones = SEG_1;
+        4'd2: countdown_preview_ones = SEG_2;
+        4'd3: countdown_preview_ones = SEG_3;
+        4'd4: countdown_preview_ones = SEG_4;
+        4'd5: countdown_preview_ones = SEG_5;
+        4'd6: countdown_preview_ones = SEG_6;
+        4'd7: countdown_preview_ones = SEG_7;
+        4'd8: countdown_preview_ones = SEG_8;
+        4'd9: countdown_preview_ones = SEG_9;
+        default: countdown_preview_ones = SEG_BLANK;
+    endcase
+end
+
+// 倒计时运行时的两位数显示辅助逻辑
+reg [7:0] countdown_run_tens, countdown_run_ones;
+
+always @(*) begin
+    // 根据当前倒计时秒数计算十位和个位的段码
+    if (countdown_seconds >= 4'd10) begin
+        countdown_run_tens = SEG_1;  // 10-15秒时十位显示1
+    end else begin
+        countdown_run_tens = SEG_BLANK;  // 0-9秒时十位不显示
+    end
+    
+    // 个位始终显示
+    case (countdown_seconds % 10)
+        4'd0: countdown_run_ones = SEG_0;
+        4'd1: countdown_run_ones = SEG_1;
+        4'd2: countdown_run_ones = SEG_2;
+        4'd3: countdown_run_ones = SEG_3;
+        4'd4: countdown_run_ones = SEG_4;
+        4'd5: countdown_run_ones = SEG_5;
+        4'd6: countdown_run_ones = SEG_6;
+        4'd7: countdown_run_ones = SEG_7;
+        4'd8: countdown_run_ones = SEG_8;
+        4'd9: countdown_run_ones = SEG_9;
+        default: countdown_run_ones = SEG_BLANK;
+    endcase
+end
+
 // dk7/dk8 赋值逻辑
 always @(*) begin
     dk7_value = SEG_BLANK;
     dk8_value = SEG_BLANK;
 
-    // 当处于 Operator 模式且可能触发错误时（或简单地只要倒计时不为0）显示
-    // 这里依据你的描述：运算数不符合要求 -> 开启输入倒计时
-    // 如果你有专门的 'S_ERROR' 状态，可以加进 if 里
-    // 下面的逻辑是：只要处于 Operator 相关状态，就把当前的倒计时数值显示在 dk8 上
-    if (state == S_OPERATOR || state == S_OP_T || state == S_OP_A || 
-        state == S_OP_B || state == S_OP_C || state == S_OP_J) begin
-        
-        dk8_value = countdown_seg; // 个位显示在最右侧 dk8
-        dk7_value = SEG_BLANK;     // 十位保持黑屏 (如果倒计时大于9需要修改此处)
+    //--------------------------------------------------------------------------
+// 优先级 1: 倒计时配置预览（S_SE_c 状态，最高优先级）
+//--------------------------------------------------------------------------
+    if (state == S_SE_c) begin
+        dk7_value = countdown_preview_tens;  // 十位（5-15范围内的预览）
+        dk8_value = countdown_preview_ones;  // 个位
     end
-
-    //优先级 2: 矩阵数量设置显示
-    // 当处于 S_SE_n
+    
+    //--------------------------------------------------------------------------
+// 优先级 2: 运算模式下的实时倒计时显示（倒计时激活时）
+//--------------------------------------------------------------------------
+    else if (in_op_substate && countdown_active) begin
+        // 运算子状态下且倒计时正在运行，显示当前秒数
+        dk7_value = countdown_run_tens;   // 十位（>=10时显示1）
+        dk8_value = countdown_run_ones;   // 个位
+    end
+    
+    //--------------------------------------------------------------------------
+// 优先级 3: 矩阵数量限制设置预览（S_SE_n 状态）
+//--------------------------------------------------------------------------
     else if (state == S_SE_n) begin
-        dk7_value = limit_seg;    
+        dk7_value = limit_seg;     // 显示1-7的预览值
         dk8_value = SEG_BLANK;    
     end
 end
