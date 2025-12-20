@@ -23,7 +23,9 @@ module operand_selector #(
     //--------------------------------------------------------------------------
     input wire        start,              // 开始选择 (单周期脉冲)
     input wire        confirm,            // 确认按钮 (单周期脉冲)
-    input wire [2:0]  dim_input,          // 维度/编号输入 (来自拨码开关)
+    input wire [2:0]  row_input,          // 行数输入 (来自拨码开关)
+    input wire [2:0]  col_input,          // 列数输入 (来自拨码开关)
+    input wire [2:0]  matrix_select,      // 矩阵编号选择 (来自拨码开关)
     input wire [PTR_WIDTH:0] mat_count,   // 当前存储的矩阵数量
     
     //--------------------------------------------------------------------------
@@ -69,19 +71,18 @@ module operand_selector #(
     // 状态机定义
     //==========================================================================
     localparam S_IDLE         = 4'd0;
-    localparam S_WAIT_ROW     = 4'd1;   // 等待用户输入行数
-    localparam S_WAIT_COL     = 4'd2;   // 等待用户输入列数
-    localparam S_SCAN_START   = 4'd3;   // 开始扫描匹配的矩阵
-    localparam S_SCAN_WAIT    = 4'd4;   // 等待读取
-    localparam S_SCAN_CHECK   = 4'd5;   // 检查是否匹配
-    localparam S_SCAN_NEXT    = 4'd6;   // 下一个矩阵
-    localparam S_SHOW_LIST    = 4'd7;   // 显示匹配的矩阵列表
-    localparam S_WAIT_SELECT  = 4'd8;   // 等待用户选择
-    localparam S_VALIDATE     = 4'd9;   // 验证选择
-    localparam S_SHOW_MATRIX  = 4'd10;  // 显示选中的矩阵
-    localparam S_SEND_DATA    = 4'd11;  // 发送矩阵数据
-    localparam S_DONE         = 4'd12;
-    localparam S_ERROR        = 4'd13;
+    localparam S_WAIT_CONFIRM = 4'd1;   // 等待用户确认维度
+    localparam S_SCAN_START   = 4'd2;   // 开始扫描匹配的矩阵
+    localparam S_SCAN_WAIT    = 4'd3;   // 等待读取
+    localparam S_SCAN_CHECK   = 4'd4;   // 检查是否匹配
+    localparam S_SCAN_NEXT    = 4'd5;   // 下一个矩阵
+    localparam S_SHOW_LIST    = 4'd6;   // 显示匹配的矩阵列表
+    localparam S_WAIT_SELECT  = 4'd7;   // 等待用户选择
+    localparam S_VALIDATE     = 4'd8;   // 验证选择
+    localparam S_SHOW_MATRIX  = 4'd9;   // 显示选中的矩阵
+    localparam S_SEND_DATA    = 4'd10;  // 发送矩阵数据
+    localparam S_DONE         = 4'd11;
+    localparam S_ERROR        = 4'd12;
 
     reg [3:0] state;
     reg wait_tx;
@@ -146,26 +147,17 @@ module operand_selector #(
                     if (start) begin
                         busy <= 1;
                         match_count <= 0;
-                        state <= S_WAIT_ROW;
+                        state <= S_WAIT_CONFIRM;
                     end
                 end
 
                 //--------------------------------------------------------------
-                // 等待用户输入行数
+                // 等待用户确认维度 (同时读取行数和列数)
                 //--------------------------------------------------------------
-                S_WAIT_ROW: begin
+                S_WAIT_CONFIRM: begin
                     if (confirm) begin
-                        target_row <= dim_input;
-                        state <= S_WAIT_COL;
-                    end
-                end
-
-                //--------------------------------------------------------------
-                // 等待用户输入列数
-                //--------------------------------------------------------------
-                S_WAIT_COL: begin
-                    if (confirm) begin
-                        target_col <= dim_input;
+                        target_row <= row_input;
+                        target_col <= col_input;
                         scan_idx <= 0;
                         match_count <= 0;
                         state <= S_SCAN_START;
@@ -333,15 +325,15 @@ module operand_selector #(
                 // 验证选择
                 //--------------------------------------------------------------
                 S_VALIDATE: begin
-                    // dim_input 是用户输入的编号 (1-based)
-                    if (dim_input >= 1 && dim_input <= match_count) begin
-                        selected_id <= match_ids[dim_input - 1];
+                    // matrix_select 是用户输入的编号 (1-based)
+                    if (matrix_select >= 1 && matrix_select <= match_count) begin
+                        selected_id <= match_ids[matrix_select - 1];
                         selected_row <= target_row;
                         selected_col <= target_col;
                         
                         // 显示选中的矩阵
-                        read_id <= match_ids[dim_input - 1];
-                        match_idx <= dim_input - 1;
+                        read_id <= match_ids[matrix_select - 1];
+                        match_idx <= matrix_select - 1;
                         current_row <= 0;
                         current_col <= 0;
                         send_step <= 0;
