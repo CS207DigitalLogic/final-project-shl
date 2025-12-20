@@ -77,6 +77,7 @@ wire [2:0] operand2_id = sw_left[4:2]; // operand 2 matrix ID
 wire [2:0] row_input = sw_left[5:3]; // 行数输入 for Operand Selector
 wire [2:0] col_input = sw_left[2:0]; // 列数输入 for Operand Selector
 wire [2:0] matrix_select = sw_left[2:0]; // 矩阵选择输入 for Operand Selector
+wire       auto_select_switch = sw_right[3]; // 自动选择运算数开关
 //======================================================================
 // 3. Debounce modules
 //======================================================================
@@ -184,7 +185,7 @@ always @(*) begin
                     3'b011: state_next = S_DISPLAYER;
                     3'b100: state_next = S_OPERATOR;
                     3'b101: state_next = S_SETTINGS;
-                    default: ; // stay in current state
+                    default: state_next = state; // 保持当前状态
                 endcase
                 
                 // jump to operator sub-states
@@ -195,7 +196,8 @@ always @(*) begin
                         3'b010: state_next = S_OP_B;
                         3'b011: state_next = S_OP_C;
                         3'b100: state_next = S_OP_J;
-                        default: ; // stay in current state
+                        // 修复：无效的 op_sel 时保持 S_OPERATOR
+                        default: state_next = S_OPERATOR;
                     endcase
                 end
             end
@@ -206,8 +208,7 @@ always @(*) begin
         S_OP_T, 
         S_OP_A, 
         S_OP_B, 
-        S_OP_C, 
-        S_OP_J: begin
+        S_OP_C,        S_OP_J: begin
             if (confirm_flag) begin
                 // jump to main functions or menu
                 case (menu_sel)
@@ -228,7 +229,8 @@ always @(*) begin
                     3'b010: state_next = S_OP_B;
                     3'b011: state_next = S_OP_C;
                     3'b100: state_next = S_OP_J;
-                    default: ; // stay in current state
+                    // 修复：无效的 op_sel 时保持当前状态，而不是跳到 S_OPERATOR
+                    default: state_next = state; // 保持当前状态
                 endcase
                 end
             end
@@ -378,22 +380,44 @@ wire       result_display_tx_start;
 wire       result_display_busy;
 wire       result_display_done;
 
-// --- UART TX Mux (Priority: Convolution > ResultDisplay > Selector > Summary > Display) ---
+
+// --- 运算数展示模块 UART 信号 ---
+wire [7:0] operand_display_tx_data;
+wire       operand_display_tx_start;
+wire       operand_display_busy;
+wire       operand_display_done;
+
+
+// --- 自动运算数选择器信号 ---
+wire       auto_selector_busy;
+wire       auto_selector_done;
+wire       auto_selector_error;
+wire [PTR_WIDTH-1:0] auto_operand_A_id;
+wire [PTR_WIDTH-1:0] auto_operand_B_id;
+wire [3:0]           auto_scalar_value;
+wire [2:0]           auto_result_A_row, auto_result_A_col;
+wire [2:0]           auto_result_B_row, auto_result_B_col;
+wire [PTR_WIDTH-1:0] auto_scan_id_A;
+wire [PTR_WIDTH-1:0] auto_scan_id_B;
+
+// --- UART TX Mux (Priority: Convolution > ResultDisplay > OperandDisplay > Selector > Summary > Display) ---
 wire [7:0] tx_data_mux;
 wire       tx_start_mux;
 wire       tx_busy;
 
-assign tx_data_mux  = conv_busy            ? conv_tx_data            :
-                      result_display_busy ? result_display_tx_data :
-                      selector_busy       ? selector_tx_data       :
-                      summary_busy        ? summary_tx_data        :
-                      display_busy        ? display_tx_data        : 8'd0;
+assign tx_data_mux  = conv_busy              ? conv_tx_data            :
+                      result_display_busy   ? result_display_tx_data   :
+                      operand_display_busy  ? operand_display_tx_data  :
+                      selector_busy         ? selector_tx_data         :
+                      summary_busy          ? summary_tx_data          :
+                      display_busy          ? display_tx_data          : 8'd0;
 
-assign tx_start_mux = conv_busy            ? conv_tx_start           :
-                      result_display_busy ? result_display_tx_start :
-                      selector_busy       ? selector_tx_start       :
-                      summary_busy        ? summary_tx_start        :
-                      display_busy        ? display_tx_start        : 1'b0;
+assign tx_start_mux = conv_busy              ? conv_tx_start            :
+                      result_display_busy   ? result_display_tx_start   :
+                      operand_display_busy  ? operand_display_tx_start  :
+                      selector_busy         ? selector_tx_start         :
+                      summary_busy          ? summary_tx_start          :
+                      display_busy          ? display_tx_start          : 1'b0;
 
 uart_tx #(
     .CLK_FREQ(CLK_FREQ),
@@ -426,6 +450,8 @@ wire [4:0]           display_read_addr;
 wire [PTR_WIDTH-1:0] summary_read_id;
 wire [PTR_WIDTH-1:0] selector_read_id;
 wire [4:0]           selector_read_addr;
+wire [PTR_WIDTH-1:0] operand_disp_read_id;
+wire [4:0]           operand_disp_read_addr;
 
 // ========== 双运算数选择逻辑 (前向声明) ==========
 // 用于需要两个矩阵的运算（加法、矩阵乘）
@@ -443,25 +469,34 @@ wire [4:0]           calc_read_addr_A_out;  // 来自 matrix_calculator
 wire [4:0]           calc_read_addr_B_out;  // 来自 matrix_calculator
 wire                 calc_busy;             // 来自 matrix_calculator 
 
-// --- 端口 A 多路复用 (Priority: Selector > Summary > Display > Calc/Default) ---
+// --- 端口 A 多路复用 (Priority: AutoSelector > OperandDisplay > Selector > Summary > Display > Calc/Default) ---
 // 注意: calc_read_addr_A_out 将在后面计算模块实例化后才声明为 wire
 wire [PTR_WIDTH-1:0] mux_read_id_A;
 wire [4:0]           mux_read_addr_A;
 
 // 地址选择：计算模块忙时使用计算模块请求的地址
-assign mux_read_addr_A = selector_busy ? selector_read_addr :
-                         display_busy  ? display_read_addr  :
-                         calc_busy     ? calc_read_addr_A_out : 5'd0;
+assign mux_read_addr_A = auto_selector_busy    ? 5'd0                  :
+                         operand_display_busy ? operand_disp_read_addr :
+                         selector_busy        ? selector_read_addr     :
+                         display_busy         ? display_read_addr      :
+                         calc_busy            ? calc_read_addr_A_out   : 5'd0;
 
 // ID 选择：确保计算模块忙时使用正确的矩阵 ID
-assign mux_read_id_A   = selector_busy ? selector_read_id :
-                         summary_busy  ? summary_read_id  :
-                         display_busy  ? display_read_id  :
-                         calc_busy     ? calc_read_id_A   : 
+assign mux_read_id_A   = auto_selector_busy    ? auto_scan_id_A        :
+                         operand_display_busy ? operand_disp_read_id   :
+                         selector_busy        ? selector_read_id       :
+                         summary_busy         ? summary_read_id        :
+                         display_busy         ? display_read_id        :
+                         calc_busy            ? calc_read_id_A         : 
                          calc_read_id_A;
 
-// --- 端口 B (专供 Calculator)
-// 计算模块忙时使用其请求的地址
+// --- 端口 B 多路复用 (AutoSelector / OperandDisplay / Calculator) ---
+// 修复：自动选择器忙时使用其扫描ID，否则使用计算模块的运算数B ID
+wire [PTR_WIDTH-1:0] mux_read_id_B;
+assign mux_read_id_B = auto_selector_busy    ? auto_scan_id_B        :
+                       operand_display_busy ? operand_B_id           :  // 运算数展示时使用B的ID
+                       calc_read_id_B;
+
 assign read_addr_B = calc_busy ? calc_read_addr_B_out : 5'd0;
 
 // 实例化用户的存储单元 (Matrix Storage Unit)
@@ -489,8 +524,8 @@ matrix_storage_unit #(
     .read_addr_A    (mux_read_addr_A),   
     .read_data_A    (read_data_A),   
 
-    // Port B (Operand 2)
-    .read_id_B      (calc_read_id_B),   
+    // Port B (Muxed) - 修复：使用多路复用后的ID
+    .read_id_B      (mux_read_id_B),   
     .dim_row_B      (dim_row_B),
     .dim_col_B      (dim_col_B),
     .read_addr_B    (read_addr_B),
@@ -553,7 +588,10 @@ matrix_uart_display #(
 );
 
 // --- B. 矩阵摘要展示模块 ---
-// 触发条件: 处于 S_DISPLAYER 状态, 按下 Send 键, 且 sw_right[1]=1 (摘要模式)
+// 触发条件: 
+// 1. 处于 S_DISPLAYER 状态, 按下 Send 键, 且 sw_right[1]=1 (摘要模式)
+// 2. 按下 Confirm 进入任一运算子状态 (S_OP_*) 时，自动打印摘要
+//    修复：只有从非运算子状态进入时才触发，已在运算子状态时不再触发
 reg summary_start_pulse;
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) summary_start_pulse <= 1'b0;
@@ -562,12 +600,22 @@ always @(posedge clk or negedge rst_n) begin
         if (state == S_DISPLAYER && send_flag && sw_right[1] && !summary_busy && !display_busy) begin
             summary_start_pulse <= 1'b1;
         end
+        // 新增：进入运算子状态时自动触发摘要打印
+        // 条件：从非运算子状态 -> 运算子状态，且所有模块空闲
+        // 修复：添加 !in_op_substate 检查，确保只在首次进入运算子状态时触发
+        else if (confirm_flag && !in_op_substate &&
+                 (state_next == S_OP_T || state_next == S_OP_A || 
+                  state_next == S_OP_B || state_next == S_OP_C || 
+                  state_next == S_OP_J) &&  // 下一状态是运算子状态
+                 !summary_busy && !display_busy && !selector_busy) begin
+            summary_start_pulse <= 1'b1;
+        end
     end
 end
 
 matrix_summary_display #(
     .MAX_MATRICES(MAX_MATRICES),
-    .PTR_WIDTH(PTR_WIDTH) // 重要: 必须使用 4 位以匹配你的存储设计
+    .PTR_WIDTH(PTR_WIDTH)
 ) u_matrix_summary (
     .clk            (clk),
     .rst_n          (rst_n),
@@ -654,7 +702,205 @@ operand_selector #(
 );
 
 //==========================================================================
-// 9. 倒计时模块实例化
+// 9-A. 自动运算数选择相关状态和控制逻辑
+//==========================================================================
+// 自动选择流程状态
+// 0: 初始状态（刚进入运算子状态）
+// 1: 等待用户确认选择模式（sw_right[3]决定自动/手动）
+// 2: 自动选择中
+// 3: 自动选择完成，展示运算数中
+// 4: 展示完成，等待后续操作
+reg [2:0] auto_select_state;
+reg       auto_selector_start;       // 自动选择器启动脉冲
+reg       operand_display_start;     // 运算数展示启动脉冲
+reg       operand_display_triggered; // 修复：防止重复触发展示的标志
+reg       auto_select_mode;          // 1=自动选择模式, 0=手动选择模式
+reg       auto_select_error_flag;    // 自动选择发生错误
+reg [3:0] final_scalar_value;        // 最终使用的标量值（自动或手动）
+
+localparam AS_INIT           = 3'd0;  // 初始状态
+localparam AS_WAIT_CONFIRM   = 3'd1;  // 等待confirm确认选择模式
+localparam AS_AUTO_SELECTING = 3'd2;  // 自动选择中
+localparam AS_DISPLAYING     = 3'd3;  // 展示运算数中
+localparam AS_DONE           = 3'd4;  // 完成
+localparam AS_ERROR          = 3'd5;  // 发生错误
+
+// 自动选择状态机
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        auto_select_state <= AS_INIT;
+        auto_selector_start <= 1'b0;
+        operand_display_start <= 1'b0;
+        operand_display_triggered <= 1'b0;
+        auto_select_mode <= 1'b0;
+        auto_select_error_flag <= 1'b0;
+        final_scalar_value <= 4'd0;
+    end else begin
+        auto_selector_start <= 1'b0;
+        operand_display_start <= 1'b0;
+        
+        // 离开运算子状态时复位
+        if (!in_op_substate) begin
+            auto_select_state <= AS_INIT;
+            auto_select_mode <= 1'b0;
+            auto_select_error_flag <= 1'b0;
+            operand_display_triggered <= 1'b0;
+        end else begin
+            case (auto_select_state)
+                AS_INIT: begin
+                    // 刚进入运算子状态，等待摘要打印完成
+                    if (in_op_substate && !summary_busy) begin
+                        auto_select_state <= AS_WAIT_CONFIRM;
+                    end
+                    auto_select_error_flag <= 1'b0;
+                end
+                
+                AS_WAIT_CONFIRM: begin
+                    // 等待用户按confirm确认选择模式
+                    // 修复：确保所有显示模块都空闲后才处理
+                    if (confirm_flag && !summary_busy && !selector_busy && 
+                        !auto_selector_busy && !operand_display_busy &&
+                        !result_display_busy && !display_busy) begin
+                        if (auto_select_switch) begin
+                            // sw_right[3]=1: 自动选择模式
+                            auto_select_mode <= 1'b1;
+                            auto_selector_start <= 1'b1;
+                            auto_select_state <= AS_AUTO_SELECTING;
+                        end else begin
+                            // sw_right[3]=0: 手动选择模式
+                            auto_select_mode <= 1'b0;
+                            auto_select_state <= AS_DONE;
+                        end
+                    end
+                end
+                
+                AS_AUTO_SELECTING: begin
+                    // 等待自动选择器完成
+                    if (auto_selector_done) begin
+                        if (auto_selector_error) begin
+                            // 无法找到合法运算数
+                            auto_select_error_flag <= 1'b1;
+                            auto_select_state <= AS_ERROR;
+                        end else begin
+                            // 选择成功，等待一个周期让运算数ID稳定后再启动展示
+                            auto_select_state <= AS_DISPLAYING;
+                            operand_display_triggered <= 1'b0;  // 修复：重置触发标志
+                            // 保存自动选择的标量值
+                            if (state == S_OP_B) begin
+                                final_scalar_value <= auto_scalar_value;
+                            end
+                        end
+                    end
+                end
+                
+                AS_DISPLAYING: begin
+                    // 修复：使用 operand_display_triggered 标志确保只触发一次
+                    // 修复：必须等待 summary_busy 为低才能启动，避免UART冲突
+                    if (!operand_display_busy && !operand_display_triggered && !summary_busy) begin
+                        operand_display_start <= 1'b1;
+                        operand_display_triggered <= 1'b1;  // 设置标志，防止再次触发
+                    end
+                    // 等待运算数展示完成
+                    if (operand_display_done) begin
+                        auto_select_state <= AS_DONE;
+                    end
+                end
+                
+                AS_DONE: begin
+                    // 选择完成，等待用户按confirm执行计算
+                end
+                
+                AS_ERROR: begin
+                    // 错误状态，等待confirm清除
+                    if (confirm_flag) begin
+                        auto_select_error_flag <= 1'b0;
+                        auto_select_state <= AS_WAIT_CONFIRM;
+                        operand_display_triggered <= 1'b0;  // 修复：重置触发标志
+                    end
+                end
+                
+                default: auto_select_state <= AS_INIT;
+            endcase
+        end
+    end
+end
+
+//==========================================================================
+// 9-B. 自动运算数选择器实例化
+//==========================================================================
+auto_operand_selector #(
+    .MAX_MATRICES(MAX_MATRICES),
+    .PTR_WIDTH(PTR_WIDTH)
+) u_auto_selector (
+    .clk            (clk),
+    .rst_n          (rst_n),
+    
+    // 控制接口
+    .start          (auto_selector_start),
+    .op_type        (calc_opcode),
+    .mat_count      (storage_mat_count),
+    
+    // 矩阵读取接口
+    .scan_id_A      (auto_scan_id_A),
+    .dim_row_A      (dim_row_A),
+    .dim_col_A      (dim_col_A),
+    .scan_id_B      (auto_scan_id_B),
+    .dim_row_B      (dim_row_B),
+    .dim_col_B      (dim_col_B),
+    
+    // 随机数种子 (使用内部LFSR)
+    .lfsr_seed      (16'h0000),
+    
+    // 输出结果
+    .busy           (auto_selector_busy),
+    .done           (auto_selector_done),
+    .error          (auto_selector_error),
+    .operand_A_id   (auto_operand_A_id),
+    .operand_B_id   (auto_operand_B_id),
+    .scalar_value   (auto_scalar_value),
+    .result_A_row   (auto_result_A_row),
+    .result_A_col   (auto_result_A_col),
+    .result_B_row   (auto_result_B_row),
+    .result_B_col   (auto_result_B_col)
+);
+
+//==========================================================================
+// 9-C. 运算数展示模块实例化
+//==========================================================================
+operand_display #(
+    .PTR_WIDTH(PTR_WIDTH)
+) u_operand_display (
+    .clk            (clk),
+    .rst_n          (rst_n),
+    
+    // 控制接口
+    .start_display  (operand_display_start),
+    .op_type        (calc_opcode),
+    
+    // 运算数信息
+    .operand_A_id   (auto_operand_A_id),
+    .operand_B_id   (auto_operand_B_id),
+    .scalar_val     (auto_scalar_value),
+    
+    // 矩阵数据接口
+    .read_id        (operand_disp_read_id),
+    .read_addr      (operand_disp_read_addr),
+    .read_data      (read_data_A),
+    .dim_row        (dim_row_A),
+    .dim_col        (dim_col_A),
+    
+    // UART TX 接口
+    .tx_data        (operand_display_tx_data),
+    .tx_start       (operand_display_tx_start),
+    .tx_busy        (tx_busy),
+    
+    // 状态输出
+    .busy           (operand_display_busy),
+    .done           (operand_display_done)
+);
+
+//==========================================================================
+// 10. 倒计时模块实例化
 //==========================================================================
 wire [3:0] countdown_seconds; // 连接到数码管显示逻辑
 wire       countdown_active;  // 连接到 led_busy
@@ -791,7 +1037,6 @@ always @(posedge clk or negedge rst_n) begin
                         end
                     end
                 end
-                
                 S_OP_C: begin
                     // 矩阵乘：需要 A的列数 = B的行数
                     if (operand_A_selected && operand_B_selected) begin
@@ -803,7 +1048,6 @@ always @(posedge clk or negedge rst_n) begin
                         end
                     end
                 end
-                
                 default: ;
             endcase
         end
@@ -972,10 +1216,27 @@ always @(posedge clk or negedge rst_n) begin
         calc_start_pulse <= 1'b0;
         result_display_start <= 1'b0;
 
-        //----------------------------------------------------------------------
-        // 运算数选择器完成选择时的处理
-        //----------------------------------------------------------------------
-        if (selector_done) begin
+        //----------------------------------------------------------------
+        // 自动选择器完成选择时的处理
+        //----------------------------------------------------------------
+        if (auto_selector_done && !auto_selector_error && auto_select_mode) begin
+            // 自动选择成功，保存运算数ID
+            operand_A_id <= auto_operand_A_id;
+            operand_A_selected <= 1'b1;
+            if (needs_two_operands) begin
+                operand_B_id <= auto_operand_B_id;
+                operand_B_selected <= 1'b1;
+            end else begin
+                // 单运算数时清除B的选择状态
+                operand_B_id <= 0;
+                operand_B_selected <= 1'b0;
+            end
+        end
+
+        //----------------------------------------------------------------
+        // 运算数选择器完成选择时的处理（手动模式）
+        //----------------------------------------------------------------
+        if (selector_done && !auto_select_mode) begin
             if (needs_one_operand) begin
                 // 单运算数运算：直接保存到 A
                 operand_A_id <= selected_operand_id;
@@ -996,60 +1257,67 @@ always @(posedge clk or negedge rst_n) begin
             end
         end
 
-        //----------------------------------------------------------------------
+        //----------------------------------------------------------------
         // 倒计时超时时：清除运算数选择状态，强制重新选择
-        //----------------------------------------------------------------------
+        //----------------------------------------------------------------
         if (countdown_timeout && (waiting_for_reselection || reselection_in_progress)) begin
             operand_A_selected <= 1'b0;
             operand_B_selected <= 1'b0;
             selecting_second <= 1'b0;
         end
         
-        //----------------------------------------------------------------------
+        //----------------------------------------------------------------
         // 进入重选模式时：立即清除选择状态以便重选
-        //----------------------------------------------------------------------
+        //----------------------------------------------------------------
         else if (start_countdown && (state == S_OP_A || state == S_OP_C)) begin
-            // 刚启动倒计时时清除选择状态（下一个时钟周期生效）
             operand_A_selected <= 1'b0;
             operand_B_selected <= 1'b0;
             selecting_second <= 1'b0;
         end
 
-        //----------------------------------------------------------------------
+        //----------------------------------------------------------------
         // 离开运算子状态时：清除所有选择状态
-        //----------------------------------------------------------------------
+        //----------------------------------------------------------------
         if (!in_op_substate) begin
             operand_A_selected <= 1'b0;
             operand_B_selected <= 1'b0;
             selecting_second <= 1'b0;
+            calc_active <= 1'b0;
+            // 修复：同时清除自动选择模式标志
         end
 
-        //----------------------------------------------------------------------
+        //----------------------------------------------------------------
         // 计算完成后自动显示结果
-        //----------------------------------------------------------------------
+        // 修复：添加更多保护条件，确保没有其他模块在使用UART
+        //----------------------------------------------------------------
         if (calc_active && calc_done && in_op_substate && 
-            !result_display_busy && !selector_busy) begin
+            !result_display_busy && !selector_busy && 
+            !summary_busy && !display_busy && !operand_display_busy &&
+            !auto_selector_busy) begin
             result_display_start <= 1'b1;
             calc_active <= 1'b0;
         end
 
-        //----------------------------------------------------------------------
+        //----------------------------------------------------------------
         // 结果显示完成后：清除选择状态以便下次选择
-        //----------------------------------------------------------------------
+        //----------------------------------------------------------------
         if (result_display_done) begin
             operand_A_selected <= 1'b0;
             operand_B_selected <= 1'b0;
         end
 
-        //----------------------------------------------------------------------
+        //----------------------------------------------------------------
         // 启动计算的条件
-        //----------------------------------------------------------------------
-        // 条件：在运算子状态 + 按确认 + 运算数就绪 + 不在重选模式 + 各模块空闲
+        // 修复：自动选择模式下需要在AS_DONE状态且用户按confirm才启动计算
+        //----------------------------------------------------------------
         if (in_op_substate && confirm_flag && operands_ready && 
             !waiting_for_reselection && !reselection_in_progress &&
-            !countdown_active &&  // 新增：倒计时未激活
+            !countdown_active &&
             !selector_busy && !display_busy && 
-            !summary_busy && !result_display_busy && !calc_busy) begin
+            !summary_busy && !result_display_busy && !calc_busy &&
+            !auto_selector_busy && !operand_display_busy &&
+            // 修复：自动选择模式下需要在展示完成后才能启动计算
+            (!auto_select_mode || auto_select_state == AS_DONE)) begin
             case (state)
                 S_OP_T: begin
                     // 转置：无需验证
@@ -1079,9 +1347,9 @@ always @(posedge clk or negedge rst_n) begin
             endcase
         end
 
-        //----------------------------------------------------------------------
+        //----------------------------------------------------------------
         // 离开运算子状态时清除 calc_active
-        //----------------------------------------------------------------------
+        //----------------------------------------------------------------
         if (!in_op_substate) begin
             calc_active <= 1'b0;
         end
@@ -1100,9 +1368,11 @@ matrix_calculator #(
     // 控制接口
     .start          (calc_start_pulse),
     .opcode         (calc_opcode),
-    .scalar         (scalar_input[3:0]),  // 标量乘法使用的标量值
+    // 标量乘法使用的标量值：自动模式用自动选择的值，手动模式用拨码开关
+    .scalar         (auto_select_mode ? final_scalar_value : scalar_input[3:0]),
     
     // 矩阵 A 接口（来自存储单元端口 A）
+    // 修复：确保使用正确的运算数ID对应的维度
     .dim_row_A      (dim_row_A),
     .dim_col_A      (dim_col_A),
     .read_addr_A    (calc_read_addr_A_out),
@@ -1157,10 +1427,13 @@ calc_result_display #(
 //==========================================================================
 // LED logic
 //==========================================================================
-assign led_error = error_flag | storage_input_error | selector_error;
+assign led_error = error_flag | storage_input_error | selector_error | auto_select_error_flag;
 assign led_idle  = (state == S_MENU);
-assign led_busy  = countdown_active || selector_busy || calc_busy || result_display_busy || conv_busy || (state >= S_OP_T && state <= S_OP_J);
-assign led_done  = calc_done || selector_done || result_display_done || conv_ctrl_done;
+assign led_busy  = countdown_active || selector_busy || calc_busy || result_display_busy || 
+                   conv_busy || auto_selector_busy || operand_display_busy || 
+                   (state >= S_OP_T && state <= S_OP_J);
+assign led_done  = calc_done || selector_done || result_display_done || conv_ctrl_done || 
+                   (auto_selector_done && !auto_selector_error) || operand_display_done;
 
 // UART work indicators
 always @(*) begin
@@ -1598,6 +1871,11 @@ seg_scan u_seg_scan_1b (
 //----------------------------------------------------------------------
 // 4. 最终端口映射
 //----------------------------------------------------------------------
+// 判断是否只显示DK7/DK8（倒计时或设置预览时禁用DK5/DK6）
+wire dk56_disabled = (in_op_substate && countdown_active) ||  // 运算模式倒计时
+                     (state == S_SE_c) ||                      // 倒计时配置
+                     (state == S_SE_n);                        // 矩阵数量限制配置
+
 always @(*) begin
     // ------------- DK1-DK4 (seg0 bus) -----------------
     seg0   = seg0_scan_out;
@@ -1605,13 +1883,21 @@ always @(*) begin
     dk4_en = dk4_en_scan;
 
     // ------------- DK5-DK8 (seg1 bus) -----------------
-    // seg1总线使用OR合并两个扫描输出（因为同一时刻只有一个使能）
-    seg1 = seg1_scan_out_a | seg1_scan_out_b;
-    
-    dk5_en = dk5_en_scan;
-    dk6_en = dk6_en_scan;
-    dk7_en = dk7_en_scan;
-    dk8_en = dk8_en_scan;
+    // 当只需要显示DK7/DK8时，禁用DK5/DK6以避免干扰
+    if (dk56_disabled) begin
+        seg1 = seg1_scan_out_b;  // 只使用DK7/DK8的段码
+        dk5_en = 1'b0;
+        dk6_en = 1'b0;
+        dk7_en = dk7_en_scan;
+        dk8_en = dk8_en_scan;
+    end else begin
+        // seg1总线使用OR合并两个扫描输出（因为同一时刻只有一个使能）
+        seg1 = seg1_scan_out_a | seg1_scan_out_b;
+        dk5_en = dk5_en_scan;
+        dk6_en = dk6_en_scan;
+        dk7_en = dk7_en_scan;
+        dk8_en = dk8_en_scan;
+    end
 end
 
 endmodule
