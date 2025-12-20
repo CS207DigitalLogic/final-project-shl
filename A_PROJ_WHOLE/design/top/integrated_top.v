@@ -10,8 +10,8 @@ module integrated_top (
     input wire rst_n,            // 复位 (低有效)
 
     // 拨码开关
-    input wire [7:0] sw,         // sw[7:5]=菜单选择, sw[4:3]=设置, sw[2:0]=运算类型
-    input wire [5:0] sw_right,   // [5:2]=标量选择/倒计时选择，[2:0]=矩阵选择
+    input wire [7:0] sw_right,   // sw[7:5]=菜单选择, sw[4:3]=设置, sw[2:0]=运算类型
+    input wire [7:0] sw_left,    // [5:2]=标量选择/倒计时选择，[2:0]=矩阵选择
 
     // 按键 (Active High, 需消抖)
     input wire btn_confirm,      // 确认键
@@ -22,8 +22,8 @@ module integrated_top (
     output wire uart_tx,         // UART 发送线
 
     // UART control signals
-    input  wire uart_tx_rst_n,   // UART TX reset (active low)
-    input  wire uart_rx_rst_n,   // UART RX reset (active low)
+    // input  wire uart_tx_rst_n,   // UART TX reset (active low)
+    // input  wire uart_rx_rst_n,   // UART RX reset (active low)
 
     // LED 
     output wire led_error,       // 错误指示
@@ -47,8 +47,8 @@ module integrated_top (
 
 
 // Internal UART work indicators
-wire uart_tx_work = uart_tx_rst_n;
-wire uart_rx_work = uart_rx_rst_n;
+wire uart_tx_work = 1;
+wire uart_rx_work = 1;
 
 // Internal error flag
 reg  error_flag;
@@ -64,15 +64,17 @@ localparam PTR_WIDTH    = 4;
 //======================================================================
 // 2. input decode
 //======================================================================
-wire [2:0] menu_sel = sw[7:5];  // main menu selection
-wire [2:0] op_sel   = sw[2:0];  // operator sub-function selection
-wire [1:0] setting_sel = sw[4:3]; // setting selection (not used in this top module)
-wire [3:0] scalar_input = sw_right[5:2]; // scalar input for scalar multiplication
-wire [3:0] count_down_input = sw_right[5:2]; // countdown input
-wire [2:0] matrix_limit_input_preview = sw_right[5:3]; // matrix per type limit input
-wire [2:0] operand1_id = sw_right[5:3]; // operand 1 matrix ID
-wire [2:0] operand2_id = sw_right[2:0]; // operand 2 matrix ID
-wire [2:0] dim_input = sw_right[2:0]; // Input for Operand Selector (Teammate's logic)
+wire [2:0] menu_sel = sw_right[7:5];  // main menu selection
+wire [2:0] op_sel   = sw_right[2:0];  // operator sub-function selection
+wire [1:0] setting_sel = sw_right[4:3]; // setting selection 
+wire [3:0] scalar_input = sw_left[7:4]; // scalar input for scalar multiplication
+wire [3:0] count_down_input = sw_left[7:4]; // countdown input
+wire [2:0] matrix_limit_input_preview = sw_left[7:5]; // matrix per type limit input
+wire [2:0] operand1_id = sw_left[7:5]; // operand 1 matrix ID
+wire [2:0] operand2_id = sw_left[4:2]; // operand 2 matrix ID
+wire [2:0] row_input = sw_left[5:3]; // 行数输入 for Operand Selector
+wire [2:0] col_input = sw_left[2:0]; // 列数输入 for Operand Selector
+wire [2:0] matrix_select = sw_left[2:0]; // 矩阵选择输入 for Operand Selector
 //======================================================================
 // 3. Debounce modules
 //======================================================================
@@ -136,7 +138,7 @@ always @(*) begin
     state_next = state;
 
     case (state)
-        // main menu -> main functions, SW7-SW5 + confirm btn
+        // main menu -> main functions, (right)SW7-SW5 + confirm btn
         S_MENU: begin
             if (confirm_flag) begin
                 case (menu_sel)
@@ -152,7 +154,7 @@ always @(*) begin
         end
 
         // main functions -> main functions &
-        // back to menu, SW7-SW5 + confirm btn
+        // back to menu, (right)SW7-SW5 + confirm btn
         S_INPUTER, 
         S_GENERATOR,  
         S_DISPLAYER: begin
@@ -169,7 +171,7 @@ always @(*) begin
             end
         end
 
-        // operator -> operator sub-states, SW2-SW0 + confirm btn
+        // operator -> operator sub-states, (right)SW2-SW0 + confirm btn
         S_OPERATOR: begin
             if (confirm_flag) begin
                 // jump to main functions or menu
@@ -230,7 +232,7 @@ always @(*) begin
             end
         end
 
-        // settings -> settings sub-states, SW4-SW3 + confirm btn
+        // settings -> settings sub-states, (right)SW4-SW3 + confirm btn
         S_SETTINGS: begin
             if (confirm_flag) begin
                 // jump to main functions or menu
@@ -475,21 +477,21 @@ matrix_storage_unit #(
 //==========================================================================
 
 // --- A. 矩阵内容 UART 展示模块 (Matrix UART Display) ---
-// 触发条件: 处于 S_DISPLAYER 状态, 按下 Send 键, 且 sw[1]=0 (非摘要模式)
+// 触发条件: 处于 S_DISPLAYER 状态, 按下 Send 键, 且 sw_right[1]=0 (非摘要模式)
 reg display_start_pulse;
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) display_start_pulse <= 1'b0;
     else begin
         display_start_pulse <= 1'b0; // 默认为0，形成脉冲
         // 只有在空闲且符合条件时才触发
-        if (state == S_DISPLAYER && send_flag && !sw[1] && !display_busy && !summary_busy) begin
+        if (state == S_DISPLAYER && send_flag && !sw_right[1] && !display_busy && !summary_busy) begin
             display_start_pulse <= 1'b1;
         end
     end
 end
 
-// 开关控制: sw[0]=1 表示展示所有矩阵
-wire display_all_matrices = sw[0];
+// 开关控制: sw_right[0]=1 表示展示所有矩阵
+wire display_all_matrices = sw_right[0];
 
 // 数据管道: 将存储单元端口 A 的输出信号引过来
 wire [2:0] display_dim_row_in = dim_row_A;
@@ -522,13 +524,13 @@ matrix_uart_display #(
 );
 
 // --- B. 矩阵摘要展示模块 ---
-// 触发条件: 处于 S_DISPLAYER 状态, 按下 Send 键, 且 sw[1]=1 (摘要模式)
+// 触发条件: 处于 S_DISPLAYER 状态, 按下 Send 键, 且 sw_right[1]=1 (摘要模式)
 reg summary_start_pulse;
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) summary_start_pulse <= 1'b0;
     else begin
         summary_start_pulse <= 1'b0;
-        if (state == S_DISPLAYER && send_flag && sw[1] && !summary_busy && !display_busy) begin
+        if (state == S_DISPLAYER && send_flag && sw_right[1] && !summary_busy && !display_busy) begin
             summary_start_pulse <= 1'b1;
         end
     end
@@ -593,7 +595,9 @@ operand_selector #(
     .rst_n          (rst_n),
     .start          (selector_start_pulse),
     .confirm        (confirm_flag),
-    .dim_input      (dim_input),        // 来自右侧开关 sw_right[2:0] 的输入
+    .row_input      (row_input),        // 来自左侧开关 sw_left[5:3] 的行数输入
+    .col_input      (col_input),        // 来自左侧开关 sw_left[2:0] 的列数输入
+    .matrix_select  (matrix_select),    // 来自左侧开关 sw_left[4:2] 的矩阵选择
     .mat_count      (storage_mat_count),
     
     // 连接到存储单元的接口

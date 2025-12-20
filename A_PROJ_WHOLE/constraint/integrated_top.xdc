@@ -18,54 +18,53 @@ set_property PACKAGE_PIN V1 [get_ports btn_confirm]
 set_property IOSTANDARD LVCMOS33 [get_ports btn_confirm]
 
 # ================= SWITCHES ================
-set_property PACKAGE_PIN T3 [get_ports uart_tx_rst_n]
-set_property IOSTANDARD LVCMOS33 [get_ports uart_tx_rst_n]
+set_property PACKAGE_PIN U3 [get_ports {sw_right[7]}]      
+set_property IOSTANDARD LVCMOS33 [get_ports {sw_right[7]}]
 
-set_property PACKAGE_PIN T5 [get_ports uart_rx_rst_n]
-set_property IOSTANDARD LVCMOS33 [get_ports uart_rx_rst_n]
+set_property PACKAGE_PIN U2 [get_ports {sw_right[6]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {sw_right[6]}]
 
-set_property PACKAGE_PIN U3 [get_ports {sw_right[5]}]      
+set_property PACKAGE_PIN V2 [get_ports {sw_right[5]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {sw_right[5]}]
 
-set_property PACKAGE_PIN U2 [get_ports {sw_right[4]}]
+set_property PACKAGE_PIN V5 [get_ports {sw_right[4]}]     
 set_property IOSTANDARD LVCMOS33 [get_ports {sw_right[4]}]
 
-set_property PACKAGE_PIN V2 [get_ports {sw_right[3]}]
+set_property PACKAGE_PIN V4 [get_ports {sw_right[3]}]      
 set_property IOSTANDARD LVCMOS33 [get_ports {sw_right[3]}]
 
-set_property PACKAGE_PIN V5 [get_ports {sw_right[2]}]     
+set_property PACKAGE_PIN R3 [get_ports {sw_right[2]}]     
 set_property IOSTANDARD LVCMOS33 [get_ports {sw_right[2]}]
 
-set_property PACKAGE_PIN V4 [get_ports {sw_right[1]}]      
+set_property PACKAGE_PIN T3 [get_ports {sw_right[1]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {sw_right[1]}]
 
-set_property PACKAGE_PIN R3 [get_ports {sw_right[0]}]     
+set_property PACKAGE_PIN T5 [get_ports {sw_right[0]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {sw_right[0]}]
 
-set_property PACKAGE_PIN R1 [get_ports {sw[0]}]
-set_property IOSTANDARD LVCMOS33 [get_ports {sw[0]}]
+set_property PACKAGE_PIN R1 [get_ports {sw_left[0]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {sw_left[0]}]
 
-set_property PACKAGE_PIN N4 [get_ports {sw[1]}]
-set_property IOSTANDARD LVCMOS33 [get_ports {sw[1]}]
+set_property PACKAGE_PIN N4 [get_ports {sw_left[1]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {sw_left[1]}]
 
-set_property PACKAGE_PIN M4 [get_ports {sw[2]}]
-set_property IOSTANDARD LVCMOS33 [get_ports {sw[2]}]
+set_property PACKAGE_PIN M4 [get_ports {sw_left[2]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {sw_left[2]}]
 
-set_property PACKAGE_PIN R2 [get_ports {sw[3]}]
-set_property IOSTANDARD LVCMOS33 [get_ports {sw[3]}]
+set_property PACKAGE_PIN R2 [get_ports {sw_left[3]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {sw_left[3]}]
 
-set_property PACKAGE_PIN P2 [get_ports {sw[4]}]
-set_property IOSTANDARD LVCMOS33 [get_ports {sw[4]}]
+set_property PACKAGE_PIN P2 [get_ports {sw_left[4]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {sw_left[4]}]
 
-set_property PACKAGE_PIN P3 [get_ports {sw[5]}]
-set_property IOSTANDARD LVCMOS33 [get_ports {sw[5]}]
+set_property PACKAGE_PIN P3 [get_ports {sw_left[5]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {sw_left[5]}]
 
-set_property PACKAGE_PIN P4 [get_ports {sw[6]}]
-set_property IOSTANDARD LVCMOS33 [get_ports {sw[6]}]
+set_property PACKAGE_PIN P4 [get_ports {sw_left[6]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {sw_left[6]}]
 
-set_property PACKAGE_PIN P5 [get_ports {sw[7]}]
-set_property IOSTANDARD LVCMOS33 [get_ports {sw[7]}]
-
+set_property PACKAGE_PIN P5 [get_ports {sw_left[7]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {sw_left[7]}]
 # ================= LEDS ==================
 
 # LED0_uart_rx
