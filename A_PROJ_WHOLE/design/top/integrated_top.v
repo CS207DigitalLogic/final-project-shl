@@ -1592,101 +1592,111 @@ always @(*) begin
 end
 
 // 辅助逻辑：将卷积周期数转换为4位BCD段码（支持0-9999）
-// 使用查找表方式，避免任何运算问题
+// 使用迭代减法进行BCD转换（避免除法运算）
 reg [3:0] bcd_thousands, bcd_hundreds, bcd_tens, bcd_ones;
+reg [15:0] temp_count;
 
 always @(*) begin
-    // 直接针对2000-2999范围硬编码（因为我们知道结果在这个范围）
-    case (conv_cycle_count_latched)
-        16'd2242: begin bcd_thousands=4'd2; bcd_hundreds=4'd2; bcd_tens=4'd4; bcd_ones=4'd2; end
-        16'd2243: begin bcd_thousands=4'd2; bcd_hundreds=4'd2; bcd_tens=4'd4; bcd_ones=4'd3; end
-        16'd2241: begin bcd_thousands=4'd2; bcd_hundreds=4'd2; bcd_tens=4'd4; bcd_ones=4'd1; end
-        16'd2240: begin bcd_thousands=4'd2; bcd_hundreds=4'd2; bcd_tens=4'd4; bcd_ones=4'd0; end
-        16'd2244: begin bcd_thousands=4'd2; bcd_hundreds=4'd2; bcd_tens=4'd4; bcd_ones=4'd4; end
-        16'd2245: begin bcd_thousands=4'd2; bcd_hundreds=4'd2; bcd_tens=4'd4; bcd_ones=4'd5; end
-        // 通用算法作为后备
-        default: begin
-            // 千位
-            if (conv_cycle_count_latched >= 16'd2000)
-                bcd_thousands = 4'd2;
-            else if (conv_cycle_count_latched >= 16'd1000)
-                bcd_thousands = 4'd1;
-            else
-                bcd_thousands = 4'd0;
-            
-            // 百位 - 手动计算2000-2999范围
-            if (conv_cycle_count_latched >= 16'd2900)
-                bcd_hundreds = 4'd9;
-            else if (conv_cycle_count_latched >= 16'd2800)
-                bcd_hundreds = 4'd8;
-            else if (conv_cycle_count_latched >= 16'd2700)
-                bcd_hundreds = 4'd7;
-            else if (conv_cycle_count_latched >= 16'd2600)
-                bcd_hundreds = 4'd6;
-            else if (conv_cycle_count_latched >= 16'd2500)
-                bcd_hundreds = 4'd5;
-            else if (conv_cycle_count_latched >= 16'd2400)
-                bcd_hundreds = 4'd4;
-            else if (conv_cycle_count_latched >= 16'd2300)
-                bcd_hundreds = 4'd3;
-            else if (conv_cycle_count_latched >= 16'd2200)
-                bcd_hundreds = 4'd2;
-            else if (conv_cycle_count_latched >= 16'd2100)
-                bcd_hundreds = 4'd1;
-            else if (conv_cycle_count_latched >= 16'd2000)
-                bcd_hundreds = 4'd0;
-            else
-                bcd_hundreds = 4'd0;
-            
-            // 十位 - 针对2200-2299范围
-            if (conv_cycle_count_latched >= 16'd2290)
-                bcd_tens = 4'd9;
-            else if (conv_cycle_count_latched >= 16'd2280)
-                bcd_tens = 4'd8;
-            else if (conv_cycle_count_latched >= 16'd2270)
-                bcd_tens = 4'd7;
-            else if (conv_cycle_count_latched >= 16'd2260)
-                bcd_tens = 4'd6;
-            else if (conv_cycle_count_latched >= 16'd2250)
-                bcd_tens = 4'd5;
-            else if (conv_cycle_count_latched >= 16'd2240)
-                bcd_tens = 4'd4;
-            else if (conv_cycle_count_latched >= 16'd2230)
-                bcd_tens = 4'd3;
-            else if (conv_cycle_count_latched >= 16'd2220)
-                bcd_tens = 4'd2;
-            else if (conv_cycle_count_latched >= 16'd2210)
-                bcd_tens = 4'd1;
-            else if (conv_cycle_count_latched >= 16'd2200)
-                bcd_tens = 4'd0;
-            else
-                bcd_tens = 4'd0;
-            
-            // 个位 - 2240-2249范围
-            if (conv_cycle_count_latched >= 16'd2249)
-                bcd_ones = 4'd9;
-            else if (conv_cycle_count_latched >= 16'd2248)
-                bcd_ones = 4'd8;
-            else if (conv_cycle_count_latched >= 16'd2247)
-                bcd_ones = 4'd7;
-            else if (conv_cycle_count_latched >= 16'd2246)
-                bcd_ones = 4'd6;
-            else if (conv_cycle_count_latched >= 16'd2245)
-                bcd_ones = 4'd5;
-            else if (conv_cycle_count_latched >= 16'd2244)
-                bcd_ones = 4'd4;
-            else if (conv_cycle_count_latched >= 16'd2243)
-                bcd_ones = 4'd3;
-            else if (conv_cycle_count_latched >= 16'd2242)
-                bcd_ones = 4'd2;
-            else if (conv_cycle_count_latched >= 16'd2241)
-                bcd_ones = 4'd1;
-            else if (conv_cycle_count_latched >= 16'd2240)
-                bcd_ones = 4'd0;
-            else
-                bcd_ones = conv_cycle_count_latched[3:0];
-        end
-    endcase
+    temp_count = conv_cycle_count_latched;
+    
+    // 计算千位
+    if (temp_count >= 9000) begin
+        bcd_thousands = 4'd9;
+        temp_count = temp_count - 9000;
+    end else if (temp_count >= 8000) begin
+        bcd_thousands = 4'd8;
+        temp_count = temp_count - 8000;
+    end else if (temp_count >= 7000) begin
+        bcd_thousands = 4'd7;
+        temp_count = temp_count - 7000;
+    end else if (temp_count >= 6000) begin
+        bcd_thousands = 4'd6;
+        temp_count = temp_count - 6000;
+    end else if (temp_count >= 5000) begin
+        bcd_thousands = 4'd5;
+        temp_count = temp_count - 5000;
+    end else if (temp_count >= 4000) begin
+        bcd_thousands = 4'd4;
+        temp_count = temp_count - 4000;
+    end else if (temp_count >= 3000) begin
+        bcd_thousands = 4'd3;
+        temp_count = temp_count - 3000;
+    end else if (temp_count >= 2000) begin
+        bcd_thousands = 4'd2;
+        temp_count = temp_count - 2000;
+    end else if (temp_count >= 1000) begin
+        bcd_thousands = 4'd1;
+        temp_count = temp_count - 1000;
+    end else begin
+        bcd_thousands = 4'd0;
+    end
+    
+    // 计算百位
+    if (temp_count >= 900) begin
+        bcd_hundreds = 4'd9;
+        temp_count = temp_count - 900;
+    end else if (temp_count >= 800) begin
+        bcd_hundreds = 4'd8;
+        temp_count = temp_count - 800;
+    end else if (temp_count >= 700) begin
+        bcd_hundreds = 4'd7;
+        temp_count = temp_count - 700;
+    end else if (temp_count >= 600) begin
+        bcd_hundreds = 4'd6;
+        temp_count = temp_count - 600;
+    end else if (temp_count >= 500) begin
+        bcd_hundreds = 4'd5;
+        temp_count = temp_count - 500;
+    end else if (temp_count >= 400) begin
+        bcd_hundreds = 4'd4;
+        temp_count = temp_count - 400;
+    end else if (temp_count >= 300) begin
+        bcd_hundreds = 4'd3;
+        temp_count = temp_count - 300;
+    end else if (temp_count >= 200) begin
+        bcd_hundreds = 4'd2;
+        temp_count = temp_count - 200;
+    end else if (temp_count >= 100) begin
+        bcd_hundreds = 4'd1;
+        temp_count = temp_count - 100;
+    end else begin
+        bcd_hundreds = 4'd0;
+    end
+    
+    // 计算十位
+    if (temp_count >= 90) begin
+        bcd_tens = 4'd9;
+        temp_count = temp_count - 90;
+    end else if (temp_count >= 80) begin
+        bcd_tens = 4'd8;
+        temp_count = temp_count - 80;
+    end else if (temp_count >= 70) begin
+        bcd_tens = 4'd7;
+        temp_count = temp_count - 70;
+    end else if (temp_count >= 60) begin
+        bcd_tens = 4'd6;
+        temp_count = temp_count - 60;
+    end else if (temp_count >= 50) begin
+        bcd_tens = 4'd5;
+        temp_count = temp_count - 50;
+    end else if (temp_count >= 40) begin
+        bcd_tens = 4'd4;
+        temp_count = temp_count - 40;
+    end else if (temp_count >= 30) begin
+        bcd_tens = 4'd3;
+        temp_count = temp_count - 30;
+    end else if (temp_count >= 20) begin
+        bcd_tens = 4'd2;
+        temp_count = temp_count - 20;
+    end else if (temp_count >= 10) begin
+        bcd_tens = 4'd1;
+        temp_count = temp_count - 10;
+    end else begin
+        bcd_tens = 4'd0;
+    end
+    
+    // 个位就是剩余的值
+    bcd_ones = temp_count[3:0];
 end
 
 // 将数字转换为段码的函数
@@ -1788,17 +1798,16 @@ always @(*) begin
 
     // 优先级1: 卷积完成后显示周期数（在S_OP_J状态且有效周期数）
     if (state == S_OP_J && cycle_count_valid) begin
-        // 直接用固定段码测试，显示 2242
-        // 尝试取反（共阳极数码管）
-        dk5_value = ~SEG_2;  // 千位: 2
-        dk6_value = ~SEG_2;  // 百位: 2
-        dk7_value = ~SEG_4;  // 十位: 4
-        dk8_value = ~SEG_2;  // 个位: 2
+        // 使用BCD转换后的数字显示实际周期数
+        dk5_value = digit_to_seg(bcd_thousands);  // 千位
+        dk6_value = digit_to_seg(bcd_hundreds);   // 百位
+        dk7_value = digit_to_seg(bcd_tens);       // 十位
+        dk8_value = digit_to_seg(bcd_ones);       // 个位
     end
     //--------------------------------------------------------------------------
     // 优先级 2: 倒计时配置预览（S_SE_c 状态，最高优先级）
     //--------------------------------------------------------------------------
-    if (state == S_SE_c) begin
+    else if (state == S_SE_c) begin
         dk7_value = countdown_preview_tens;  // 十位（5-15范围内的预览）
         dk8_value = countdown_preview_ones;  // 个位
     end
@@ -1836,14 +1845,6 @@ wire [7:0] seg0_scan_out;
 wire       dk1_en_scan;
 wire       dk4_en_scan;
 
-wire [7:0] seg1_scan_out_a;  // DK5和DK6的段码输出
-wire       dk5_en_scan;
-wire       dk6_en_scan;
-
-wire [7:0] seg1_scan_out_b;  // DK7和DK8的段码输出
-wire       dk7_en_scan;
-wire       dk8_en_scan;
-
 // 控制 Seg0 总线 (DK1, DK4)
 seg_scan u_seg_scan_0 (
     .clk    (clk),
@@ -1855,58 +1856,85 @@ seg_scan u_seg_scan_0 (
     .en_b   (dk4_en_scan)         
 );
 
-// 控制 Seg1 总线 (DK5, DK6) - 千位和百位
-seg_scan u_seg_scan_1a (
-    .clk    (clk),
-    .rst_n  (rst_n),
-    .val_a  (dk5_value),  // DK5 - 千位
-    .val_b  (dk6_value),  // DK6 - 百位
-    .seg    (seg1_scan_out_a),
-    .en_a   (dk5_en_scan), // 控制 DK5
-    .en_b   (dk6_en_scan)  // 控制 DK6
-);
+// 控制 Seg1 总线 (DK5, DK6, DK7, DK8) - 需要4位扫描
+// 参考seg_scan.v的时序逻辑实现，避免串扰
+reg [1:0] seg1_current_digit;  // 0=DK5, 1=DK6, 2=DK7, 3=DK8
+reg [15:0] seg1_timer;
+localparam SEG1_SWITCH_TIME = 16'd25000;  // 每个数码管总周期0.25ms
+localparam SEG1_BLANK_TIME = 16'd2000;    // 消隐时间20us
 
-// 控制 Seg1 总线 (DK7, DK8) - 十位和个位
-seg_scan u_seg_scan_1b (
-    .clk    (clk),
-    .rst_n  (rst_n),
-    .val_a  (dk7_value),  // DK7 - 十位
-    .val_b  (dk8_value),  // DK8 - 个位
-    .seg    (seg1_scan_out_b),
-    .en_a   (dk7_en_scan), // 控制 DK7
-    .en_b   (dk8_en_scan)  // 控制 DK8
-);
+// 时序逻辑控制段码和使能信号（关键：避免组合逻辑毛刺）
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        seg1_timer <= 0;
+        seg1_current_digit <= 0;
+        seg1 <= 8'h00;
+        dk5_en <= 0;
+        dk6_en <= 0;
+        dk7_en <= 0;
+        dk8_en <= 0;
+    end else begin
+        seg1_timer <= seg1_timer + 1;
+        
+        // =========================================================
+        // PHASE 1: TURN OFF (切换开始，关闭所有使能)
+        // =========================================================
+        if (seg1_timer == SEG1_SWITCH_TIME) begin
+            seg1_timer <= 0;
+            dk5_en <= 0;
+            dk6_en <= 0;
+            dk7_en <= 0;
+            dk8_en <= 0;
+            
+            // 切换到下一个数码管
+            seg1_current_digit <= seg1_current_digit + 1;
+        end
+        
+        // =========================================================
+        // PHASE 2: UPDATE DATA (消隐期中间，更新段码数据)
+        // =========================================================
+        else if (seg1_timer == (SEG1_BLANK_TIME / 2)) begin
+            case (seg1_current_digit)
+                2'd0: seg1 <= dk5_value;  // DK5 - 千位
+                2'd1: seg1 <= dk6_value;  // DK6 - 百位
+                2'd2: seg1 <= dk7_value;  // DK7 - 十位
+                2'd3: seg1 <= dk8_value;  // DK8 - 个位
+            endcase
+        end
+        
+        // =========================================================
+        // PHASE 3: TURN ON (消隐期结束，开启对应使能)
+        // =========================================================
+        else if (seg1_timer == SEG1_BLANK_TIME) begin
+            // 根据dk56_disabled决定是否启用DK5/DK6
+            case (seg1_current_digit)
+                2'd0: dk5_en <= !dk56_disabled;  // DK5
+                2'd1: dk6_en <= !dk56_disabled;  // DK6
+                2'd2: dk7_en <= 1;               // DK7
+                2'd3: dk8_en <= 1;               // DK8
+            endcase
+        end
+    end
+end
 
 //----------------------------------------------------------------------
 // 4. 最终端口映射
 //----------------------------------------------------------------------
+// 判断是否需要全部4位显示（卷积周期数显示时）
+wire need_4digits = (state == S_OP_J && cycle_count_valid);
+
 // 判断是否只显示DK7/DK8（倒计时或设置预览时禁用DK5/DK6）
-wire dk56_disabled = (in_op_substate && countdown_active) ||  // 运算模式倒计时
-                     (state == S_SE_c) ||                      // 倒计时配置
-                     (state == S_SE_n);                        // 矩阵数量限制配置
+wire dk56_disabled = !need_4digits && (
+                      (in_op_substate && countdown_active) ||  // 运算模式倒计时
+                      (state == S_SE_c) ||                      // 倒计时配置
+                      (state == S_SE_n)                         // 矩阵数量限制配置
+                     );
 
 always @(*) begin
     // ------------- DK1-DK4 (seg0 bus) -----------------
     seg0   = seg0_scan_out;
     dk1_en = dk1_en_scan;
     dk4_en = dk4_en_scan;
-
-    // ------------- DK5-DK8 (seg1 bus) -----------------
-    // 当只需要显示DK7/DK8时，禁用DK5/DK6以避免干扰
-    if (dk56_disabled) begin
-        seg1 = seg1_scan_out_b;  // 只使用DK7/DK8的段码
-        dk5_en = 1'b0;
-        dk6_en = 1'b0;
-        dk7_en = dk7_en_scan;
-        dk8_en = dk8_en_scan;
-    end else begin
-        // seg1总线使用OR合并两个扫描输出（因为同一时刻只有一个使能）
-        seg1 = seg1_scan_out_a | seg1_scan_out_b;
-        dk5_en = dk5_en_scan;
-        dk6_en = dk6_en_scan;
-        dk7_en = dk7_en_scan;
-        dk8_en = dk8_en_scan;
-    end
 end
 
 endmodule
