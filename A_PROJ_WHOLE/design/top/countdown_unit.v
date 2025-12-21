@@ -34,7 +34,12 @@ module countdown_unit #(
             // 默认拉低超时信号 (产生脉冲)
             timeout <= 1'b0;
 
-            if (active) begin
+            // 优先处理启动信号：无论当前是否在倒计时，收到 start 都重新开始
+            if (start) begin
+                active          <= 1'b1;
+                current_seconds <= effective_setting;
+                counter         <= 32'd0;
+            end else if (active) begin
                 // 正在倒计时
                 if (counter >= CLK_FREQ - 1) begin
                     counter <= 32'd0;
@@ -47,14 +52,6 @@ module countdown_unit #(
                     end
                 end else begin
                     counter <= counter + 1;
-                end
-            end else begin
-                // 等待启动信号
-                // 逻辑：当收到 start 且当前不在忙碌时启动
-                if (start) begin
-                    active          <= 1'b1;
-                    current_seconds <= effective_setting;
-                    counter         <= 32'd0;
                 end
             end
         end

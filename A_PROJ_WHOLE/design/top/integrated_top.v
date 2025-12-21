@@ -929,6 +929,8 @@ countdown_unit #(
 //==========================================================================
 wire      add_valid, mul_valid;
 wire [2:0] mul_res_row, mul_res_col;
+wire operands_valid_now = (state == S_OP_A) ? add_valid :
+                          (state == S_OP_C) ? mul_valid : 1'b0;
 // 加法验证器
 adder_validator u_add_val (
     .dim_A_row(dim_row_A),    
@@ -955,6 +957,7 @@ multiplexer_validator u_mul_val (
 // 运算数选择状态追踪
 reg waiting_for_reselection;      // 等待重新选择运算数的标志
 reg reselection_in_progress;      // 正在重选过程中（倒计时期间）
+reg reselect_check_pending;       // 延迟一拍检查运算数合法性的标志
 
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
@@ -962,8 +965,10 @@ always @(posedge clk or negedge rst_n) begin
         error_flag <= 1'b0;
         waiting_for_reselection <= 1'b0;
         reselection_in_progress <= 1'b0;
+        reselect_check_pending <= 1'b0;
     end else begin
         start_countdown <= 1'b0;  // 默认不启动，形成单周期脉冲
+        reselect_check_pending <= 1'b0;  // 默认清除，形成单周期脉冲
         
         //----------------------------------------------------------------------
         // 情况1：倒计时超时处理
@@ -990,33 +995,14 @@ always @(posedge clk or negedge rst_n) begin
         end
         
         //----------------------------------------------------------------------
-        // 情况3：倒计时期间的重选完成检测
+        // 情况3：倒计时期间的重选完成检测（无需按键即可提前解除错误）
         //----------------------------------------------------------------------
-        if (countdown_active && reselection_in_progress) begin
-            // 如果在倒计时期间，两个运算数都已重新选择完成
-            if (needs_two_operands && operand_A_selected && operand_B_selected) begin
-                // 重选完成，检查新运算数是否合法
-                case (state)
-                    S_OP_A: begin
-                        if (add_valid) begin
-                            // 新运算数合法：清除错误，停止倒计时相关标志
-                            error_flag <= 1'b0;
-                            reselection_in_progress <= 1'b0;
-                            waiting_for_reselection <= 1'b0;
-                            // 注意：倒计时模块会自行结束，这里不需要手动停止
-                        end
-                        // 如果不合法，继续等待或等倒计时结束
-                    end
-                    S_OP_C: begin
-                        if (mul_valid) begin
-                            error_flag <= 1'b0;
-                            reselection_in_progress <= 1'b0;
-                            waiting_for_reselection <= 1'b0;
-                        end
-                    end
-                    default: ;
-                endcase
-            end
+        if (countdown_active && reselection_in_progress &&
+            needs_two_operands && operand_A_selected && operand_B_selected &&
+            operands_valid_now) begin
+            error_flag <= 1'b0;
+            reselection_in_progress <= 1'b0;
+            waiting_for_reselection <= 1'b0;
         end
         
         //----------------------------------------------------------------------
@@ -1057,24 +1043,46 @@ always @(posedge clk or negedge rst_n) begin
         //----------------------------------------------------------------------
         if (confirm_flag && in_op_substate && countdown_active && reselection_in_progress) begin
             if (needs_two_operands && operand_A_selected && operand_B_selected) begin
-                case (state)
-                    S_OP_A: begin
-                        if (!add_valid) begin
-                            // 新运算数仍然不合法：重新启动倒计时
-                            start_countdown <= 1'b1;
-                            error_flag <= 1'b1;
-                            // 清除选择状态，要求重新开始选择
-                        end
-                        // 合法情况在"情况3"中处理
-                    end
-                    S_OP_C: begin
-                        if (!mul_valid) begin
-                            start_countdown <= 1'b1;
-                            error_flag <= 1'b1;
-                        end
-                    end
-                    default: ;
-                endcase
+                if (operands_valid_now) begin
+                    // 通过校验：清除错误并退出重选
+                    error_flag <= 1'b0;
+                    reselection_in_progress <= 1'b0;
+                    waiting_for_reselection <= 1'b0;
+                end else begin
+                    // 未通过校验：重新启动倒计时并要求重新选择
+                    start_countdown <= 1'b1;
+                    error_flag <= 1'b1;
+                    waiting_for_reselection <= 1'b1;
+                    reselection_in_progress <= 1'b1;
+                end
+            end
+        end
+        
+        //----------------------------------------------------------------------
+        // 情况6：倒计时期间选择了第二个运算数后，延迟一拍检查合法性
+        //----------------------------------------------------------------------
+        if (countdown_active && reselection_in_progress && selector_done && !auto_select_mode) begin
+            // 手动模式下，选择器完成一次选择后
+            // 如果这是第二个运算数（即 operand_A 已选，现在选的是 B）
+            // 设置延迟检查标志，下一拍进行验证
+            if (needs_two_operands && operand_A_selected) begin
+                // 此时 selector_done 触发，operand_B 将在本周期被赋值
+                // 延迟一拍等待 dim_row/col 更新后再检查
+                reselect_check_pending <= 1'b1;
+            end
+        end
+        
+        //----------------------------------------------------------------------
+        // 情况7：延迟一拍后检查运算数合法性，若不合法则重置倒计时
+        //----------------------------------------------------------------------
+        if (reselect_check_pending && countdown_active && reselection_in_progress) begin
+            if (needs_two_operands && operand_A_selected && operand_B_selected) begin
+                if (!operands_valid_now) begin
+                    // 运算数仍不合法：重新启动倒计时，清除选择状态
+                    start_countdown <= 1'b1;
+                    error_flag <= 1'b1;
+                end
+                // 如果合法，情况3会自动处理（清除错误标志）
             end
         end
     end
@@ -1310,9 +1318,10 @@ always @(posedge clk or negedge rst_n) begin
         // 启动计算的条件
         // 修复：自动选择模式下需要在AS_DONE状态且用户按confirm才启动计算
         //----------------------------------------------------------------
-        if (in_op_substate && confirm_flag && operands_ready && 
-            !waiting_for_reselection && !reselection_in_progress &&
-            !countdown_active &&
+        // 允许在重选倒计时内按下 confirm 直接发起计算（若已合法）
+        // normal_path: 未处于倒计时； countdown_path: 倒计时中且已通过验证
+        if (in_op_substate && confirm_flag && operands_ready &&
+            ((waiting_for_reselection || reselection_in_progress) ? operands_valid_now : 1'b1) &&
             !selector_busy && !display_busy && 
             !summary_busy && !result_display_busy && !calc_busy &&
             !auto_selector_busy && !operand_display_busy &&
