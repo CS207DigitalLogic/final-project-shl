@@ -225,8 +225,14 @@ module auto_operand_selector #(
                                         scan_id_B <= idx_A + 1;
                                         state <= S_WAIT_B;
                                     end else begin
-                                        // 只有一个有效矩阵，无法进行加法
-                                        state <= S_ERROR;
+                                        // 修复：只有一个矩阵时，让它自己和自己相加
+                                        operand_A_id <= idx_A;
+                                        operand_B_id <= idx_A;  // 同一个矩阵
+                                        result_A_row <= dim_row_A;
+                                        result_A_col <= dim_col_A;
+                                        result_B_row <= dim_row_A;
+                                        result_B_col <= dim_col_A;
+                                        state <= S_FOUND;
                                     end
                                 end else begin
                                     // 检查是否与第一个矩阵维度相同
@@ -246,7 +252,14 @@ module auto_operand_selector #(
                                             scan_id_A <= idx_A + 1;
                                             state <= S_WAIT_A;
                                         end else begin
-                                            state <= S_ERROR;
+                                            // 修复：找不到同规格的，用第一个矩阵自己和自己相加
+                                            operand_A_id <= first_valid_id;
+                                            operand_B_id <= first_valid_id;  // 同一个矩阵
+                                            result_A_row <= first_valid_row;
+                                            result_A_col <= first_valid_col;
+                                            result_B_row <= first_valid_row;
+                                            result_B_col <= first_valid_col;
+                                            state <= S_FOUND;
                                         end
                                     end
                                 end
@@ -319,8 +332,14 @@ module auto_operand_selector #(
                                         scan_id_B <= idx_B + 1;
                                         state <= S_WAIT_B;
                                     end else begin
-                                        // B扫描完毕，没找到匹配的
-                                        state <= S_ERROR;
+                                        // 修复：B扫描完毕没找到匹配的，用第一个矩阵自己和自己相加
+                                        operand_A_id <= first_valid_id;
+                                        operand_B_id <= first_valid_id;  // 同一个矩阵
+                                        result_A_row <= first_valid_row;
+                                        result_A_col <= first_valid_col;
+                                        result_B_row <= first_valid_row;
+                                        result_B_col <= first_valid_col;
+                                        state <= S_FOUND;
                                     end
                                 end
                             end
