@@ -56,6 +56,7 @@ module matrix_storage_unit #(
     localparam RX_ROW       = 3'd1; // 等待输入列 
     localparam RX_DATA      = 3'd2; // 接收矩阵元素数据
     localparam RX_ERROR     = 3'd3; // 错误死锁状态
+    localparam RX_DONE      = 3'd4; // 输入完成，等待confirm
     localparam RX_CLEAR     = 3'd5; // 自动补0/清空内存
 
     // --- Generator 模式状态 ---
@@ -299,6 +300,10 @@ module matrix_storage_unit #(
                                     end
                                 end
                                 
+                                RX_DONE: begin
+                                    // 输入完成状态，忽略后续数字输入
+                                end
+                                
                                 default: begin // 其他状态，默认接收
                                     parse_val <= lookahead_val;
                                     parse_valid <= 1'b1;
@@ -368,7 +373,7 @@ module matrix_storage_unit #(
                                                         mat_count <= mat_count + 1;
                                                     
                                                     input_complete <= 1'b1;
-                                                    rx_state <= RX_IDLE;
+                                                    rx_state <= RX_DONE; // 进入完成状态，忽略后续输入
                                                     target_rows <= 0; target_cols <= 0; elem_count <= 0;
                                                 end
                                             end
@@ -389,11 +394,14 @@ module matrix_storage_unit #(
                         
                         // === Case C: 非法字符 ===
                         else begin
-                            // 输入了字母 -> 进入死锁状态 RX_ERROR
-                            input_error <= 1'b1;
-                            rx_state <= RX_ERROR;
-                            parse_val <= 0;
-                            parse_valid <= 0;
+                            // RX_DONE 状态忽略所有输入
+                            if (rx_state != RX_DONE) begin
+                                // 输入了字母 -> 进入死锁状态 RX_ERROR
+                                input_error <= 1'b1;
+                                rx_state <= RX_ERROR;
+                                parse_val <= 0;
+                                parse_valid <= 0;
+                            end
                         end
                     end 
 
@@ -446,6 +454,13 @@ module matrix_storage_unit #(
                         end 
                         else if (rx_state == RX_IDLE) begin
                             input_error <= 0;
+                        end
+                        else if (rx_state == RX_DONE) begin
+                            // 输入完成状态，按 confirm 回到 IDLE
+                            rx_state <= RX_IDLE;
+                            input_error <= 0;
+                            parse_val <= 0;
+                            parse_valid <= 0;
                         end
                         else begin
                             rx_state <= RX_IDLE;
