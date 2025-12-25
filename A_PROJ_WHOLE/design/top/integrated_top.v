@@ -1592,111 +1592,15 @@ always @(*) begin
 end
 
 // 辅助逻辑：将卷积周期数转换为4位BCD段码（支持0-9999）
-// 使用迭代减法进行BCD转换（避免除法运算）
+// 使用除法和取模运算（综合器会优化）
 reg [3:0] bcd_thousands, bcd_hundreds, bcd_tens, bcd_ones;
-reg [15:0] temp_count;
 
 always @(*) begin
-    temp_count = conv_cycle_count_latched;
-    
-    // 计算千位
-    if (temp_count >= 9000) begin
-        bcd_thousands = 4'd9;
-        temp_count = temp_count - 9000;
-    end else if (temp_count >= 8000) begin
-        bcd_thousands = 4'd8;
-        temp_count = temp_count - 8000;
-    end else if (temp_count >= 7000) begin
-        bcd_thousands = 4'd7;
-        temp_count = temp_count - 7000;
-    end else if (temp_count >= 6000) begin
-        bcd_thousands = 4'd6;
-        temp_count = temp_count - 6000;
-    end else if (temp_count >= 5000) begin
-        bcd_thousands = 4'd5;
-        temp_count = temp_count - 5000;
-    end else if (temp_count >= 4000) begin
-        bcd_thousands = 4'd4;
-        temp_count = temp_count - 4000;
-    end else if (temp_count >= 3000) begin
-        bcd_thousands = 4'd3;
-        temp_count = temp_count - 3000;
-    end else if (temp_count >= 2000) begin
-        bcd_thousands = 4'd2;
-        temp_count = temp_count - 2000;
-    end else if (temp_count >= 1000) begin
-        bcd_thousands = 4'd1;
-        temp_count = temp_count - 1000;
-    end else begin
-        bcd_thousands = 4'd0;
-    end
-    
-    // 计算百位
-    if (temp_count >= 900) begin
-        bcd_hundreds = 4'd9;
-        temp_count = temp_count - 900;
-    end else if (temp_count >= 800) begin
-        bcd_hundreds = 4'd8;
-        temp_count = temp_count - 800;
-    end else if (temp_count >= 700) begin
-        bcd_hundreds = 4'd7;
-        temp_count = temp_count - 700;
-    end else if (temp_count >= 600) begin
-        bcd_hundreds = 4'd6;
-        temp_count = temp_count - 600;
-    end else if (temp_count >= 500) begin
-        bcd_hundreds = 4'd5;
-        temp_count = temp_count - 500;
-    end else if (temp_count >= 400) begin
-        bcd_hundreds = 4'd4;
-        temp_count = temp_count - 400;
-    end else if (temp_count >= 300) begin
-        bcd_hundreds = 4'd3;
-        temp_count = temp_count - 300;
-    end else if (temp_count >= 200) begin
-        bcd_hundreds = 4'd2;
-        temp_count = temp_count - 200;
-    end else if (temp_count >= 100) begin
-        bcd_hundreds = 4'd1;
-        temp_count = temp_count - 100;
-    end else begin
-        bcd_hundreds = 4'd0;
-    end
-    
-    // 计算十位
-    if (temp_count >= 90) begin
-        bcd_tens = 4'd9;
-        temp_count = temp_count - 90;
-    end else if (temp_count >= 80) begin
-        bcd_tens = 4'd8;
-        temp_count = temp_count - 80;
-    end else if (temp_count >= 70) begin
-        bcd_tens = 4'd7;
-        temp_count = temp_count - 70;
-    end else if (temp_count >= 60) begin
-        bcd_tens = 4'd6;
-        temp_count = temp_count - 60;
-    end else if (temp_count >= 50) begin
-        bcd_tens = 4'd5;
-        temp_count = temp_count - 50;
-    end else if (temp_count >= 40) begin
-        bcd_tens = 4'd4;
-        temp_count = temp_count - 40;
-    end else if (temp_count >= 30) begin
-        bcd_tens = 4'd3;
-        temp_count = temp_count - 30;
-    end else if (temp_count >= 20) begin
-        bcd_tens = 4'd2;
-        temp_count = temp_count - 20;
-    end else if (temp_count >= 10) begin
-        bcd_tens = 4'd1;
-        temp_count = temp_count - 10;
-    end else begin
-        bcd_tens = 4'd0;
-    end
-    
-    // 个位就是剩余的值
-    bcd_ones = temp_count[3:0];
+    // 直接使用除法和取模计算各位数字
+    bcd_thousands = (conv_cycle_count_latched / 1000) % 10;
+    bcd_hundreds  = (conv_cycle_count_latched / 100) % 10;
+    bcd_tens      = (conv_cycle_count_latched / 10) % 10;
+    bcd_ones      = conv_cycle_count_latched % 10;
 end
 
 // 将数字转换为段码的函数
