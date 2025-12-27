@@ -39,13 +39,13 @@ module uart_rx #(
     reg rx_busy;
     reg rx_d1, rx_d2;
 
-    // ͬ��������ֹ����̬
+    // Synchronizer - prevent metastability
     always @(posedge clk) begin
         rx_d1 <= rx;
         rx_d2 <= rx_d1;
     end
 
-    // UART����״̬��
+    // UART receiver state machine
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             baud_cnt <= 0;
@@ -56,9 +56,9 @@ module uart_rx #(
         end else begin
             rx_done <= 0;
             if (!rx_busy) begin
-                if (rx_d2 == 0) begin  // ��⵽��ʼλ
+                if (rx_d2 == 0) begin  
                     rx_busy <= 1;
-                    baud_cnt <= BAUD_DIV / 2; // ���뵽�����м�
+                    baud_cnt <= BAUD_DIV / 2; 
                     bit_idx <= 0;
                 end
             end else begin
@@ -66,7 +66,7 @@ module uart_rx #(
                     baud_cnt <= 0;
                     bit_idx <= bit_idx + 1;
                     case (bit_idx)
-                        0: ; // ��ʼλ
+                        0: ; // Start bit, do nothing
                         1,2,3,4,5,6,7,8: rx_shift[bit_idx-1] <= rx_d2;
                         9: begin
                             rx_busy <= 0;
